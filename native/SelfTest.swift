@@ -95,7 +95,7 @@ func selfTest() {
     verify(account.items.contains { $0.title == "Open YouTube Music" && $0.isEnabled })
     verify(panel.reconnectButton.isEnabled)
     api.state.account_checking = true; controller.refresh()
-    verify(!panel.reconnectButton.isEnabled && panel.reconnectButton.title == "Connecting…")
+    verify(!panel.reconnectButton.isEnabled && panel.state.account_checking && panel.reconnectButton.title == "Reconnect")
     verify(!panel.nextButton.isEnabled && !panel.previousButton.isEnabled)
 
     verify(panel.profilePicker.isHidden, "a single profile is a label, not a disabled picker")
@@ -124,6 +124,7 @@ func selfTest() {
     panel.navigate(album)
     panel.closed(); panel.opened()
     verify(panel.location.key == album.key, "reopening a search destination must not rerun the old query")
+    verify(panel.sections.selectedSegment == -1, "search descendants must not claim to be a library section")
     panel.back(nil)
     verify(panel.location.key == searchLocation.key && panel.search.stringValue == "find album", "Back restores the query")
     verify(panel.sections.selectedSegment == -1, "search results are not a library section")
@@ -200,13 +201,15 @@ func selfTest() {
         api.state.pages = [fixture, Page(key: "browse:VLPLowned:", target: browseTarget("VLPLowned"), title: "Late nights", rows: (0..<8).map { Row(title: "Song \($0 + 1)", subtitle: "Artist name", play: songTarget, video: "fixture\($0)") }, play: songTarget, loading: false, more: false)]
         controller.refresh(); panel.navigate(Location.from(browseTarget("VLPLowned"), title: "Late nights")!)
         capture("playlist-dark.png", appearance: .darkAqua)
+        verify(panel.sections.frame.width >= 280, "library sections must fill the available row")
+        verify(panel.reconnectButton.frame.height == 28 && panel.reconnectButton.frame.width >= 100, "Connect needs a clear native hit area")
         for control in [panel.playButton, panel.previousButton, panel.nextButton, panel.shuffleButton, panel.addButton] {
             let frame = control.convert(control.bounds, to: panel.view)
             verify(panel.view.bounds.contains(frame) && frame.width >= 28 && frame.height >= 28, "transport hit areas must be visible and usable")
         }
     }
     panel.closed(); window.orderOut(nil)
-    let result: [String: Any] = ["result": "pass", "checks": ["prelaunch_wake", "one_status_item", "native_popover", "shuffle", "seek", "editable_only", "captured_song", "1000_scrollable_rows", "visible_cell_reuse", "refresh_preserves_content", "loading_can_pause", "search_dedup", "stale_result_navigation", "signed_out_gating", "actionable_signin", "reconnect_progress", "connecting_transport_gating", "single_profile_label", "missing_profile_not_substituted", "first_load_exposes_cancel", "warm_open_no_reload", "position_ticks_no_reload", "reopen_preserves_destination", "back_restores_search", "search_section_state", "selection_is_not_playback", "seek_tracking_stability", "seek_accounting_for_track_change", "volume_tracking_stability", "mute_restores_volume", "current_song_uses_transport", "inline_account", "search_focus_from_account", "control_hit_areas"], "warm_open_ms": warmOpenMilliseconds, "warm_open_reloads": warmReloadDelta, "render_1000_rows_ms": renderMilliseconds, "instantiated_rows": liveRows]
+    let result: [String: Any] = ["result": "pass", "checks": ["prelaunch_wake", "one_status_item", "native_popover", "shuffle", "seek", "editable_only", "captured_song", "1000_scrollable_rows", "visible_cell_reuse", "refresh_preserves_content", "loading_can_pause", "search_dedup", "stale_result_navigation", "signed_out_gating", "actionable_signin", "reconnect_progress", "connecting_transport_gating", "single_profile_label", "missing_profile_not_substituted", "first_load_exposes_cancel", "warm_open_no_reload", "position_ticks_no_reload", "reopen_preserves_destination", "back_restores_search", "search_section_state", "selection_is_not_playback", "seek_tracking_stability", "seek_accounting_for_track_change", "volume_tracking_stability", "mute_restores_volume", "current_song_uses_transport", "inline_account", "search_focus_from_account", "control_hit_areas", "search_descendant_section_state", "library_section_sizing", "connect_hit_area"], "warm_open_ms": warmOpenMilliseconds, "warm_open_reloads": warmReloadDelta, "render_1000_rows_ms": renderMilliseconds, "instantiated_rows": liveRows]
     print(String(decoding: try! JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]), as: UTF8.self))
     NSStatusBar.system.removeStatusItem(controller.status)
 }

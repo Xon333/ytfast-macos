@@ -66,6 +66,41 @@ final class SymbolButton: NSButton {
     }
 }
 
+/// A clear primary action in the connection view, with native button input
+/// and accessibility. Drawing the fill avoids platform-dependent bezel tinting.
+final class ConnectButton: NSButton {
+    init() {
+        super.init(frame: .zero)
+        title = "Connect"; isBordered = false
+        setButtonType(.momentaryPushIn)
+        font = .systemFont(ofSize: 12, weight: .semibold)
+        focusRingType = .exterior
+        translatesAutoresizingMaskIntoConstraints = false
+        heightAnchor.constraint(equalToConstant: 28).isActive = true
+        widthAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: max(100, super.intrinsicContentSize.width + 20), height: 28)
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        let pressed = cell?.isHighlighted == true
+        let fill = isEnabled ? NSColor.controlAccentColor : NSColor.quaternaryLabelColor
+        fill.withAlphaComponent(pressed ? 0.75 : 1).setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6).fill()
+        let text = NSAttributedString(string: title, attributes: [
+            .font: font ?? NSFont.systemFont(ofSize: 12, weight: .semibold),
+            .foregroundColor: isEnabled ? NSColor.white : NSColor.secondaryLabelColor
+        ])
+        let size = text.size()
+        text.draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2))
+    }
+    override func drawFocusRingMask() {
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6).fill()
+    }
+    override var focusRingMaskBounds: NSRect { bounds }
+}
+
 /// mpv can deliver updates inside AppKit's mouse-tracking loop. Keep the thumb
 /// under the user's control until tracking ends, then commit the final value.
 final class ValueSlider: NSSlider {

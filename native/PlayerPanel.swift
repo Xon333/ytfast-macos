@@ -60,7 +60,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
 
     let profilePicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let profileLabel = NSTextField(labelWithString: "")
-    let reconnectButton = NSButton(title: "Connect", target: nil, action: nil)
+    let reconnectButton = ConnectButton()
     let browserButton = NSButton(title: "Sign in", target: nil, action: nil)
     private let accountTitle = NSTextField(labelWithString: "Connect YouTube Music")
     private let accountStatus = NSTextField(wrappingLabelWithString: "")
@@ -118,7 +118,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
     }
     private func button(_ button: NSButton, _ action: Selector) {
         button.target = self; button.action = action
-        if !(button is SymbolButton) { button.bezelStyle = .rounded; button.controlSize = .small; button.font = .systemFont(ofSize: 11) }
+        if !(button is SymbolButton) && !(button is ConnectButton) { button.bezelStyle = .rounded; button.controlSize = .regular; button.font = .systemFont(ofSize: 12) }
     }
     private func add(_ child: NSView) {
         child.translatesAutoresizingMaskIntoConstraints = false
@@ -187,11 +187,13 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         search.delegate = self; search.target = self; search.action = #selector(searchNow(_:))
         search.sendsWholeSearchString = true; search.setAccessibilityLabel("Search YouTube Music")
         fixed(search, 28); add(search)
-        sections.selectedSegment = 0; sections.segmentDistribution = .fillEqually; sections.controlSize = .small
+        sections.selectedSegment = 0; sections.segmentDistribution = .fillEqually; sections.controlSize = .regular
+        sections.font = .systemFont(ofSize: 12, weight: .medium)
         sections.target = self; sections.action = #selector(changeSection(_:))
         sections.setContentHuggingPriority(.defaultLow, for: .horizontal)
         button(refreshButton, #selector(refreshPage(_:))); spinner(pageSpinner)
         horizontal(tabs, [sections, pageSpinner, refreshButton], spacing: 6)
+        sections.widthAnchor.constraint(equalTo: tabs.widthAnchor, constant: -52).isActive = true
         fixed(tabs, 30); add(tabs)
         button(backButton, #selector(back(_:))); button(pagePlay, #selector(playPage(_:)))
         pageTitle.font = .systemFont(ofSize: 12, weight: .semibold)
@@ -252,7 +254,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         accountPane.addArrangedSubview(heading)
         accountPane.addArrangedSubview(accountStatus)
         accountStatus.widthAnchor.constraint(equalTo: accountPane.widthAnchor).isActive = true
-        profilePicker.font = .systemFont(ofSize: 12); profilePicker.controlSize = .small
+        profilePicker.font = .systemFont(ofSize: 12); profilePicker.controlSize = .regular
         profilePicker.target = self; profilePicker.action = #selector(selectProfile(_:))
         profilePicker.setAccessibilityLabel("Browser profile")
         accountPane.addArrangedSubview(profilePicker)
@@ -267,8 +269,12 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         accountPane.addArrangedSubview(actions)
         button(accessButton, #selector(openDiskAccess(_:))); accessButton.isBordered = false
         button(detailsButton, #selector(toggleDetails(_:))); detailsButton.isBordered = false
-        let help = NSStackView(); horizontal(help, [accessButton, detailsButton], spacing: 8)
+        let help = NSStackView(), helpLeft = gap(), helpRight = gap()
+        horizontal(help, [helpLeft, accessButton, detailsButton, helpRight], spacing: 8)
+        help.detachesHiddenViews = true
+        helpLeft.widthAnchor.constraint(equalTo: helpRight.widthAnchor).isActive = true
         accountPane.addArrangedSubview(help)
+        help.widthAnchor.constraint(equalTo: accountPane.widthAnchor).isActive = true
         accountDetails.font = .systemFont(ofSize: 10); accountDetails.textColor = .secondaryLabelColor
         accountDetails.maximumNumberOfLines = 4; accountDetails.isSelectable = true
         accountPane.addArrangedSubview(accountDetails)
@@ -377,13 +383,15 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         transport.isHidden = !hasAudio; seek.isHidden = !hasAudio; timeRow.isHidden = !hasAudio
         search.isHidden = account; tabs.isHidden = account
         search.isEnabled = state.signed_in; sections.isEnabled = state.signed_in
-        context.isHidden = account || (history.isEmpty && location.song == nil)
+        let page = pages[location.key]
+        context.isHidden = account || (history.isEmpty && location.song == nil && page?.play == nil)
+        backButton.isHidden = history.isEmpty
         scroll.isHidden = account; accountPane.isHidden = !account
+        accountButton.isHidden = !state.signed_in
         accountButton.title = showingAccount && state.signed_in ? "Library" : "Account"
         accountButton.toolTip = state.account
         accountButton.setAccessibilityLabel(showingAccount && state.signed_in ? "Back to library" : "Account")
         muteButton.isHidden = !hasAudio; volume.isHidden = !hasAudio; appLabel.isHidden = !player.isHidden
-        let page = pages[location.key]
         let newRows = state.signed_in ? (page?.rows ?? []).filter { location.song == nil || $0.editable != nil } : []
         let moved = renderedLocation != location.identity
         if moved || newRows != rows {
@@ -404,7 +412,8 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         pagePlay.isEnabled = state.signed_in && !state.account_checking
         setText(pageTitle, location.song.map { "Add “\($0.title)”" } ?? (page?.title.isEmpty == false ? page!.title : location.title))
         pageTitle.toolTip = pageTitle.stringValue
-        sections.selectedSegment = location.query.isEmpty ? libraryIndex : -1
+        let searching = !location.query.isEmpty || (location.song == nil && history.contains { !$0.query.isEmpty })
+        sections.selectedSegment = searching ? -1 : libraryIndex
         if search.stringValue != location.query { search.stringValue = location.query }
         moreButton.isHidden = account || page?.more != true
         moreButton.isEnabled = !loading; moreButton.title = loading ? "Loading…" : "Load more"
@@ -423,8 +432,9 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         if preferredContentSize != size { preferredContentSize = size; sizeChanged?(size) }
     }
     private func renderAccount() {
-        setText(accountTitle, state.account_checking ? "Connecting…" : (state.signed_in ? "YouTube Music" : "Connect YouTube Music"))
-        setText(accountStatus, state.signed_in ? state.account : (permissionRequired ? "Allow browser access, then reconnect." : (state.account_checking ? "Checking your browser session" : "Sign in to YouTube Music, then connect.")))
+        setText(accountTitle, "YouTube Music")
+        let name = state.account.components(separatedBy: " · ").first ?? state.account
+        setText(accountStatus, state.signed_in ? name : (permissionRequired ? "Browser access is blocked." : (state.account_checking ? "Connecting…" : "Sign in in your browser, then connect.")))
         busy(accountSpinner, state.account_checking)
         let selected = state.profiles.first { $0.id == state.profile }
         let missing = state.profile != nil && selected == nil
@@ -444,7 +454,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         profileLabel.isHidden = !profilePicker.isHidden
         setText(profileLabel, selected?.label ?? (missing ? "Selected profile unavailable" : (state.profiles.first?.label ?? "Chrome, Brave or Chromium")))
         profilePicker.menu?.autoenablesItems = false
-        reconnectButton.title = state.account_checking ? "Connecting…" : (state.signed_in || state.profile != nil ? "Reconnect" : "Connect")
+        reconnectButton.title = state.signed_in || state.profile != nil ? "Reconnect" : "Connect"
         reconnectButton.isEnabled = !state.account_checking
         accessButton.isHidden = !permissionRequired
         detailsButton.isHidden = state.signed_in || state.account_checking
@@ -602,7 +612,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
     func focusSearch() {
         guard state.signed_in else { return }
         showingAccount = false; browserDirty = true
-        if visible { render(); view.window?.makeFirstResponder(search) }
+        if visible { render(); view.window?.makeFirstResponder(search); search.selectText(nil) }
     }
     @objc func showAccount(_ sender: Any?) {
         showingAccount.toggle(); detailsVisible = false; browserDirty = true
