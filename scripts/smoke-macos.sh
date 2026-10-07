@@ -28,8 +28,9 @@ mkdir -p "$repo/artifacts/native"
 "$binary" --self-test > "$repo/artifacts/native/menu-tests.json"
 export HOME="$home" PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export YTFAST_PROFILE_FILE="$repo/artifacts/native/idle-memory.json"
-if "$binary" show >/dev/null 2>&1 && [[ -S "/tmp/ytfast-$(id -u)/ytfast.sock" ]]; then
-  echo 'An instance is already running; refusing to disturb it.' >&2; exit 2
+# Show starts the app when none exists; do not invoke it as a presence probe.
+if [[ -S "/tmp/ytfast-$(id -u)/ytfast.sock" ]]; then
+  echo 'An instance socket already exists; refusing to disturb it.' >&2; exit 2
 fi
 "$binary" > "$home/stdout" 2> "$home/stderr" &
 pid=$!
@@ -45,6 +46,8 @@ if pgrep -P "$pid" -x 'mpv|yt-dlp|deno' >/dev/null; then
   echo 'Unexpected idle playback/resolver child' >&2; exit 1
 fi
 "$binary" show
+# Let AppKit enter menu tracking, instead of coalescing Show and Quit in one tick.
+sleep 1
 "$binary" quit
 for _ in {1..40}; do
   kill -0 "$pid" 2>/dev/null || break
