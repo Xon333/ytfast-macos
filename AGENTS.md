@@ -1,30 +1,147 @@
-# ytfast agent guide
+# YTfast contributor contract
 
-## Current direction (2026-10-07)
+## Current product
 
-The user explicitly replaced the desktop-UI goal for macOS with a minimal native menu. The Mac release builds with `--no-default-features --features menubar`: no egui, eframe, GPU renderer, artwork loading, or full window. Retain the shared Rust audio/API/auth core. AppKit is a thin in-process menu, not a second player. Sonora is an architectural reference, not a dependency or copied implementation; see docs/MACOS.md. Preserve the legacy desktop UI behind `desktop-ui` for Linux/development. This direction overrides conflicting earlier UI/tray constraints below. Tests and CI must stay read-only after the one-time migration.
+The macOS target is a **minimal native menu-bar YouTube Music player**.
 
+Build it with:
 
-ytfast is a native YouTube Music client: Rust + egui on [fastframe](https://github.com/crmne/fastframe), modelled on ZapFast and Spotifast. It has no browser engine, no telemetry and no server of its own. Shown in the window as "Music"; the Mac bundle is "YTfast".
+```sh
+--no-default-features --features menubar
+```
 
-## Start here
+The Mac package must remain renderer-free: no egui/eframe/winit/GPU UI stack, no WebView and no second playback engine.
 
-1. [docs/MACOS.md](docs/MACOS.md): this fork's macOS scope, build, platform boundaries and verification limits. It overrides the original SPEC's macOS exclusion and Linux-only path/desktop assumptions. macOS work is explicitly authorized; Windows and feature rewrites are not.
-2. [docs/SPEC.md](docs/SPEC.md): the inherited product journeys. Retain the player/UI instead of redefining the product from the code.
-3. [docs/integration.md](docs/integration.md): upstream's dated Linux/YouTube integration facts. Read it before touching sign-in, playback or the build; do not present its Linux observations as Mac validation.
-4. If a `notes/` directory exists, it is private and gitignored. Read `notes/AGENTS.md` before using it.
+The retained `desktop-ui` feature is the upstream/Linux desktop product and development reference. Do not let its requirements silently expand the Mac release.
 
-## Rules
+## Read order
 
-- Cookie values and browser keys are secrets. Never log, print or commit them. Derived cookie files are 0600 and short-lived; private directories are 0700. Never restart or modify the browser for sign-in.
-- Nothing from a real account goes into the repository: no captured responses, screenshots or logs. E2E artifacts stay in ignored `artifacts/`; app packages stay in ignored `dist/`.
-- Reuse upstream player/API/UI code. Platform integrations must be conditional. Retain Linux functionality. Reuse fastframe's native tray and headless loop rather than a WebView, polling subprocess UI or a separate player.
-- Colours come from the shared palette. Linux follows Omarchy; macOS currently uses the existing neutral dark fallback. No scattered UI colour constants or claims of automatic system appearance support.
-- Do not vendor or patch upstream crates here. Keep all fastframe tags and the egui/winit fork pins aligned; do not upgrade unrelated dependencies during a port fix.
-- Prefer real-app E2E for runtime claims. For platform boundaries, write synthetic known-answer/regression tests before changing the code. Never use a real account to seed tests or run destructive account tests automatically.
-- `cargo fmt --all --check`, `cargo clippy --locked --all-targets --features e2e -- -D warnings` and `cargo test --locked --features e2e` must pass on both platforms. Limit compiler parallelism to two jobs by default. Do not claim a Mac runtime or playback result from source inspection or compilation alone.
-- Keep the resolved Cargo.lock committed. Normal CI checks are read-only and must not silently rewrite source or dependency versions.
+For ordinary macOS work:
+
+1. [docs/MACOS.md](docs/MACOS.md) — current product/architecture contract.
+2. [docs/CURRENT.md](docs/CURRENT.md) — current tested state, measurements and known limits.
+3. Relevant source/tests.
+
+Read [docs/SPEC.md](docs/SPEC.md) or [docs/integration.md](docs/integration.md) only for a specific inherited desktop/Linux requirement or technical fact. They are not the current Mac scope.
+
+## Non-negotiable boundaries
+
+### Secrets and account data
+
+- Never log, print, commit or upload cookie values or browser Safe Storage secrets.
+- Real-account screenshots, private API captures and logs do not enter Git/CI.
+- Derived cookie files remain short-lived and private.
+- Never restart or modify the user's browser to obtain auth.
+- A failed selected profile/Keychain access must not silently switch accounts.
+
+### One player
+
+AppKit, macOS media controls and CLI must drive the same Rust player state.
+
+Do not add:
+
+- another playback engine;
+- a WebView/browser player;
+- a polling UI helper process;
+- a second menu application.
+
+The macOS global Now Playing item is OS-owned and separate by design.
+
+### Resource direction
+
+Preserve the menu build's lazy/bounded behavior:
+
+- current + next track preparation;
+- no menu artwork/Home/Lyrics loading;
+- bounded stream/page caches;
+- bounded native submenus;
+- no render/repaint loop.
+
+A feature that requires restoring the full renderer needs explicit product justification rather than being treated as a routine implementation detail.
+
+### Platform separation
+
+Keep Linux desktop behavior behind `desktop-ui`; keep Mac behavior behind `menubar` / native files.
+
+Do not remove retained upstream functionality merely because it is not shipped in the Mac package.
+
+## Dependency discipline
+
+- Keep `Cargo.lock` committed.
+- Do not upgrade unrelated dependencies during a focused fix.
+- Keep the inherited fastframe/egui/winit pins aligned for the retained desktop build.
+- Sonora is architecture reference only; do not copy GPL source into this MIT fork.
+
+## Verification
+
+Use the smallest meaningful affected checks.
+
+### Documentation only
+
+Check:
+
+- current-state claims against code/CI evidence;
+- relative links;
+- no accidental change to historical evidence semantics.
+
+Do not start services or access a real account just to validate prose.
+
+### Renderer-free Rust/menu core
+
+```sh
+cargo fmt --all --check
+cargo clippy --locked --no-default-features --features menubar --lib -- -D warnings
+cargo test --locked --release --no-default-features --features menubar --lib
+```
+
+### Retained desktop UI
+
+On Linux/appropriate CI:
+
+```sh
+cargo clippy --locked --all-targets --features e2e -- -D warnings
+cargo test --locked --release --features e2e --lib
+```
+
+### Native Mac
+
+The accepted CI additionally verifies:
+
+- renderer-free dependency graph;
+- production mpv IPC audio transport;
+- `scripts/build-macos.sh`;
+- `scripts/smoke-macos.sh`;
+- AppKit self-tests, launch, Show/Quit and idle child-process behavior.
+
+Do not claim real YouTube sign-in, playlist mutation, audible quality or live-session memory from compilation/synthetic tests alone.
+
+## Documentation discipline
+
+Keep current guidance small and layered:
+
+- `README.md`: user/front door.
+- `docs/MACOS.md`: current product + architecture.
+- `docs/CURRENT.md`: dated tested state.
+- `docs/SPEC.md` / `docs/integration.md`: inherited historical/reference material.
+
+When a current rule changes, replace its owning statement. Do not accumulate another exception paragraph in multiple files.
 
 ## UI copy
 
-Use YouTube Music's familiar labels: Home, Explore, Library, Up next, Lyrics, Related, Quick picks and Listen again. Plain sentence case; say what happened and the next action, without exclamations. Put technical detail behind Copy or in Settings. Never report signed in before an account request succeeds, and never silently switch a selected account after a Keychain/session failure.
+Use short YouTube Music-familiar labels. The current Mac menu needs no desktop-style explanatory prose or visual hierarchy.
+
+Current menu vocabulary includes:
+
+- Previous
+- Play / Pause
+- Next
+- Shuffle
+- Volume
+- Library
+- Playlists
+- Liked Music
+- Albums
+- Add song to playlist
+- Account
+- Reconnect
+- Quit YTfast
