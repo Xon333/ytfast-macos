@@ -4,6 +4,7 @@
 //! [`Remote`], which MPRIS and the command line use to drive the app.
 //! Transport goes straight to the backend, so it works with no window open.
 
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
@@ -12,6 +13,7 @@ use tokio::sync::watch;
 
 use crate::backend::{Command, Event};
 use crate::model::{Playback, Track};
+#[cfg(target_os = "linux")]
 use crate::paths::Paths;
 use crate::single_instance::Message;
 
@@ -154,6 +156,7 @@ impl Remote {
 /// The cover file `url` is cached in, downloading it first when the
 /// interface hasn't (the window may be closed). The same cache the
 /// interface's cover loader uses.
+#[cfg(target_os = "linux")]
 pub(crate) async fn cached_cover(
     http: &reqwest::Client,
     paths: &Paths,

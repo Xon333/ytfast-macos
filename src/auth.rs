@@ -1,50 +1,34 @@
-//! Reads the YouTube session from the desktop's Chromium-family browser.
-//!
-//! The browser keeps its cookie store open, so the database is copied first.
-//! Values are encrypted with a key derived from the browser's "Safe Storage"
-//! password in the Secret Service (see docs/plan/integration.md). Cookie
-//! values are secrets: nothing here logs them.
+//! Reads YouTube's session through a read-only SQLite transaction, including
+//! the browser's WAL. No database copies or Keychain values are written to disk.
+//! See docs/MACOS.md for platform differences and source references.
 
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::SystemTime;
+use std::process::{Command, Stdio};
+use std::time::{Duration, SystemTime};
 
 use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
 use anyhow::{Context, Result, anyhow, bail};
 use sha2::Digest;
 
-/// One browser installation ytfast can read: its name, its config directory
-/// under `~/.config`, and the `application` its Safe Storage password is
-/// filed under.
 struct Browser {
     name: &'static str,
     dir: &'static str,
     keyring: &'static str,
 }
 
+#[cfg(target_os = "linux")]
 const BROWSERS: &[Browser] = &[
-    Browser {
-        name: "Brave Origin",
-        dir: "BraveSoftware/Brave-Origin",
-        keyring: "brave",
-    },
-    Browser {
-        name: "Brave",
-        dir: "BraveSoftware/Brave-Browser",
-        keyring: "brave",
-    },
-    Browser {
-        name: "Google Chrome",
-        dir: "google-chrome",
-        keyring: "chrome",
-    },
-    Browser {
-        name: "Chromium",
-        dir: "chromium",
-        keyring: "chromium",
-    },
+    Browser { name: "Brave Origin", dir: "BraveSoftware/Brave-Origin", keyring: "brave" },
+    Browser { name: "Brave", dir: "BraveSoftware/Brave-Browser", keyring: "brave" },
+    Browser { name: "Google Chrome", dir: "google-chrome", keyring: "chrome" },
+    Browser { name: "Chromium", dir: "chromium", keyring: "chromium" },
+];
+
+#[cfg(target_os = "macos")]
+const BROWSERS: &[Browser] = &[
+    Browser { name: "Google Chrome", dir: "Google/Chrome", keyring: "Chrome Safe Storage" },
+    Browser { name: "Brave", dir: "BraveSoftware/Brave-Browser", keyring: "Brave Safe Storage" },
+    Browser { name: "Chromium", dir: "Chromium", keyring: "Chromium Safe Storage" },
 ];
 
 #[derive(Clone)]
@@ -58,12 +42,9 @@ pub struct Cookie {
     pub expires: i64,
 }
 
-/// A browser's YouTube and Google cookies.
 #[derive(Clone)]
 pub struct Session {
-    /// "Google Chrome (Default)", for the account menu.
     pub source: String,
-    /// The [`Profile::id`] it came from.
     pub profile: String,
     cookies: Vec<Cookie>,
 }
@@ -78,77 +59,50 @@ impl std::fmt::Debug for Session {
 }
 
 impl Session {
-    /// The `Cookie` header for music.youtube.com: every youtube.com cookie,
-    /// the most specific host winning a repeated name.
+    /// Every applicable cookie, with the most specific host winning a repeated name.
     pub fn header(&self) -> String {
         let mut chosen: Vec<&Cookie> = Vec::new();
         for cookie in self.cookies.iter().filter(|c| applies_to_music(&c.host)) {
             match chosen.iter_mut().find(|c| c.name == cookie.name) {
-                Some(existing) if specificity(&cookie.host) > specificity(&existing.host) => {
-                    *existing = cookie
-                }
-                Some(_) => {}
+                Some(existing) if specificity(&cookie.host) > specificity(&existing.host) => *existing = cookie,
+                Some(_) => {},
                 None => chosen.push(cookie),
             }
         }
-        chosen
-            .iter()
-            .map(|c| format!("{}={}", c.name, c.value))
-            .collect::<Vec<_>>()
-            .join("; ")
+        chosen.iter().map(|c| format!("{}={}", c.name, c.value)).collect::<Vec<_>>().join("; ")
     }
 
-    /// The value InnerTube's SAPISIDHASH authorization is computed from.
     pub fn sapisid(&self) -> Option<&str> {
         ["SAPISID", "__Secure-3PAPISID"].iter().find_map(|name| {
-            self.cookies
-                .iter()
-                .find(|c| c.name == *name && applies_to_music(&c.host))
+            self.cookies.iter().find(|c| c.name == *name && applies_to_music(&c.host))
                 .map(|c| c.value.as_str())
         })
     }
 
-    /// Writes the cookies as a Netscape cookie file (mode 0600) for yt-dlp.
+    /// Atomic 0600 export containing only YouTube/Google cookies.
     pub fn write_netscape(&self, path: &Path) -> Result<()> {
         let mut text = String::from("# Netscape HTTP Cookie File\n");
         for c in &self.cookies {
-            let domain_flag = if c.host.starts_with('.') {
-                "TRUE"
-            } else {
-                "FALSE"
-            };
+            if [&c.host, &c.path, &c.name, &c.value].iter().any(|v| v.contains(['\r', '\n', '\t', '\0'])) {
+                bail!("The browser returned an invalid cookie record");
+            }
+            let domain = if c.host.starts_with('.') { "TRUE" } else { "FALSE" };
             let secure = if c.secure { "TRUE" } else { "FALSE" };
-            text.push_str(&format!(
-                "{}\t{domain_flag}\t{}\t{secure}\t{}\t{}\t{}\n",
-                c.host, c.path, c.expires, c.name, c.value
-            ));
+            text.push_str(&format!("{}\t{domain}\t{}\t{secure}\t{}\t{}\t{}\n", c.host, c.path, c.expires, c.name, c.value));
         }
-        let temporary = path.with_extension("tmp");
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temporary)?;
-        file.write_all(text.as_bytes())?;
-        drop(file);
-        std::fs::rename(&temporary, path)?;
+        crate::paths::write_atomic(path, text.as_bytes())?;
         Ok(())
     }
 }
 
 fn applies_to_music(host: &str) -> bool {
-    host == "music.youtube.com"
-        || host == ".music.youtube.com"
-        || host == ".youtube.com"
-        || host == "youtube.com"
+    matches!(host, "music.youtube.com" | ".music.youtube.com" | ".youtube.com" | "youtube.com")
 }
 
 fn specificity(host: &str) -> usize {
     host.trim_start_matches('.').len()
 }
 
-/// A profile's cookie database and when it last changed.
 struct Candidate {
     browser: &'static Browser,
     profile: String,
@@ -157,44 +111,38 @@ struct Candidate {
 }
 
 impl Candidate {
-    /// "google-chrome/Default": how settings name a profile.
-    fn id(&self) -> String {
-        format!("{}/{}", self.browser.dir, self.profile)
-    }
-
-    fn label(&self) -> String {
-        format!("{} ({})", self.browser.name, self.profile)
-    }
+    fn id(&self) -> String { format!("{}/{}", self.browser.dir, self.profile) }
+    fn label(&self) -> String { format!("{} ({})", self.browser.name, self.profile) }
 }
 
-/// A browser profile signed in to YouTube.
+/// A profile containing YouTube sign-in cookies. Only the account API can
+/// confirm whether it is signed in; enumeration never accesses Keychain.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Profile {
     pub id: String,
     pub label: String,
 }
 
-/// Every Chromium-family profile with a cookie store, most recently used first.
+fn cookie_path(profile: &Path) -> Option<PathBuf> {
+    ["Network/Cookies", "Cookies"].iter().map(|p| profile.join(p)).find(|p| p.is_file())
+}
+
 fn candidates() -> Result<Vec<Candidate>> {
-    let config = directories::BaseDirs::new()
-        .context("no home directory")?
-        .config_dir()
-        .to_path_buf();
+    let base = directories::BaseDirs::new().context("no home directory")?;
+    #[cfg(target_os = "macos")]
+    let config = base.home_dir().join("Library/Application Support");
+    #[cfg(target_os = "linux")]
+    let config = base.config_dir().to_path_buf();
     let mut candidates = Vec::new();
     for browser in BROWSERS {
-        let Ok(entries) = std::fs::read_dir(config.join(browser.dir)) else {
-            continue;
-        };
+        let Ok(entries) = std::fs::read_dir(config.join(browser.dir)) else { continue };
         for entry in entries.flatten() {
-            let cookies = entry.path().join("Cookies");
-            let Ok(meta) = std::fs::metadata(&cookies) else {
-                continue;
-            };
+            let Some(cookies) = cookie_path(&entry.path()) else { continue };
+            let modified = [&cookies, &cookies.with_file_name("Cookies-wal")].iter()
+                .filter_map(|p| std::fs::metadata(p).ok()?.modified().ok())
+                .max().unwrap_or(SystemTime::UNIX_EPOCH);
             candidates.push(Candidate {
-                browser,
-                profile: entry.file_name().to_string_lossy().into_owned(),
-                cookies,
-                modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                browser, profile: entry.file_name().to_string_lossy().into_owned(), cookies, modified,
             });
         }
     }
@@ -202,169 +150,128 @@ fn candidates() -> Result<Vec<Candidate>> {
     Ok(candidates)
 }
 
-/// The browser profiles signed in to YouTube, for choosing which account to use.
-pub fn profiles(scratch: &Path) -> Vec<Profile> {
-    candidates()
-        .unwrap_or_default()
-        .iter()
-        .filter(|c| matches!(read_profile(c, scratch), Ok(Some(_))))
-        .map(|c| Profile {
-            id: c.id(),
-            label: c.label(),
-        })
-        .collect()
+pub fn profiles(_scratch: &Path) -> Vec<Profile> {
+    candidates().unwrap_or_default().iter()
+        .filter(|c| snapshot(c).is_ok_and(|(_, rows)| has_signin(&rows)))
+        .map(|c| Profile { id: c.id(), label: c.label() }).collect()
 }
 
-/// Reads the YouTube sign-in from `preferred` (a [`Profile::id`]) when it
-/// has one, else from the most recently used signed-in browser profile.
-///
-/// `scratch` is a private directory for the database copy.
-pub fn load(scratch: &Path, preferred: Option<&str>) -> Result<Session> {
+fn select_preferred(candidates: &mut Vec<Candidate>, preferred: Option<&str>) -> Result<()> {
+    if let Some(id) = preferred {
+        if !candidates.iter().any(|c| c.id() == id) {
+            bail!("The selected browser profile was removed. Choose another in Settings");
+        }
+        candidates.retain(|c| c.id() == id);
+    }
+    Ok(())
+}
+
+pub fn load(_scratch: &Path, preferred: Option<&str>) -> Result<Session> {
     let mut candidates = candidates()?;
     if candidates.is_empty() {
-        bail!("No Chromium-family browser profile was found");
+        bail!("Sign in to YouTube Music in Chrome, Brave or Chromium, then Reconnect");
     }
-    if let Some(preferred) = preferred
-        && let Some(i) = candidates.iter().position(|c| c.id() == preferred)
-    {
-        let chosen = candidates.remove(i);
-        candidates.insert(0, chosen);
-    }
-    let mut last_error = None;
+    select_preferred(&mut candidates, preferred)?;
     for candidate in &candidates {
-        match read_profile(candidate, scratch) {
-            Ok(Some(session)) => return Ok(session),
-            Ok(None) => {}
-            Err(error) => {
-                log::warn!("could not read {}: {error:#}", candidate.label());
-                last_error = Some(error);
-            }
-        }
+        // A denied key or failed selected profile must not select a different account.
+        if let Some(session) = read_profile(candidate)? { return Ok(session) }
     }
-    Err(last_error.unwrap_or_else(|| anyhow!("No browser profile is signed in to YouTube")))
-}
-
-fn read_profile(candidate: &Candidate, scratch: &Path) -> Result<Option<Session>> {
-    let copy = scratch.join(format!("cookies-{}.sqlite", std::process::id()));
-    std::fs::copy(&candidate.cookies, &copy).context("copying the cookie database")?;
-    let wal = candidate.cookies.with_file_name("Cookies-wal");
-    if wal.exists() {
-        let _ = std::fs::copy(
-            &wal,
-            copy.with_file_name(format!("cookies-{}.sqlite-wal", std::process::id())),
-        );
-    }
-    let result = read_copy(candidate, &copy);
-    let _ = std::fs::remove_file(&copy);
-    let _ = std::fs::remove_file(
-        copy.with_file_name(format!("cookies-{}.sqlite-wal", std::process::id())),
-    );
-    result
+    Err(anyhow!("No available browser profile has a current YouTube sign-in. Sign in, then Reconnect"))
 }
 
 type Row = (String, String, String, Vec<u8>, String, i64, bool);
 
-fn read_copy(candidate: &Candidate, copy: &Path) -> Result<Option<Session>> {
-    let db =
-        rusqlite::Connection::open_with_flags(copy, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-    let version: i64 = db
-        .query_row("SELECT value FROM meta WHERE key = 'version'", [], |row| {
-            row.get::<_, String>(0)
-        })
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+fn snapshot(candidate: &Candidate) -> Result<(i64, Vec<Row>)> {
+    let mut db = rusqlite::Connection::open_with_flags(&candidate.cookies,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .context("The browser cookie store could not be opened read-only")?;
+    db.busy_timeout(Duration::from_secs(2))?;
+    // SQLite reads the live database and WAL as one snapshot; copying them
+    // separately can combine different browser transactions.
+    let transaction = db.transaction()?;
+    read_rows(&transaction)
+}
+
+fn read_rows(db: &rusqlite::Connection) -> Result<(i64, Vec<Row>)> {
+    let version: String = db.query_row("SELECT value FROM meta WHERE key = 'version'", [], |r| r.get(0))?;
+    let version = version.parse::<i64>().context("Invalid browser cookie schema version")?;
     let mut statement = db.prepare(
-        "SELECT host_key, name, value, encrypted_value, path, expires_utc, is_secure FROM cookies \
-         WHERE host_key LIKE '%youtube.com' OR host_key LIKE '%google.com'",
-    )?;
-    let rows: Vec<Row> = statement
-        .query_map([], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    if !rows
-        .iter()
-        .any(|r| applies_to_music(&r.0) && (r.1 == "SAPISID" || r.1 == "__Secure-3PAPISID"))
-    {
-        return Ok(None);
-    }
-    let key = derive_key(&keyring_password(candidate.browser.keyring)?);
-    let mut cookies = Vec::with_capacity(rows.len());
-    let mut failed = 0;
+        "SELECT host_key, name, value, encrypted_value, path, expires_utc, is_secure FROM cookies
+         WHERE host_key = 'youtube.com' OR host_key LIKE '%.youtube.com'
+            OR host_key = 'google.com' OR host_key LIKE '%.google.com'")?;
+    let rows = statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?
+        .collect::<rusqlite::Result<Vec<Row>>>()?;
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    let rows = rows.into_iter().filter(|r| r.5 == 0 || r.5 / 1_000_000 - 11_644_473_600 > now).collect();
+    Ok((version, rows))
+}
+
+fn has_signin(rows: &[Row]) -> bool {
+    rows.iter().any(|r| applies_to_music(&r.0) && matches!(r.1.as_str(), "SAPISID" | "__Secure-3PAPISID"))
+}
+
+fn read_profile(candidate: &Candidate) -> Result<Option<Session>> {
+    let (version, rows) = snapshot(candidate)?;
+    if !has_signin(&rows) { return Ok(None) }
+    #[cfg(target_os = "macos")]
+    let (prefix, iterations) = (b"v10", 1003);
+    #[cfg(target_os = "linux")]
+    let (prefix, iterations) = (b"v11", 1);
+    let key = if rows.iter().any(|r| r.3.starts_with(prefix)) {
+        Some(derive_key(&keyring_password(candidate.browser.keyring)?, iterations))
+    } else { None };
+    let mut cookies = Vec::new();
     for (host, name, value, encrypted, path, expires_utc, secure) in rows {
-        let value = if encrypted.is_empty() {
-            value
-        } else {
-            match decrypt(&encrypted, &key, &host, version) {
-                Some(v) => v,
-                None => {
-                    failed += 1;
-                    continue;
-                }
-            }
+        let value = if encrypted.is_empty() { Some(value) } else {
+            #[cfg(target_os = "linux")]
+            let cookie_key = if encrypted.starts_with(b"v10") { Some(derive_key(b"peanuts", 1)) } else { key };
+            #[cfg(target_os = "macos")]
+            let cookie_key = encrypted.starts_with(b"v10").then_some(key).flatten();
+            cookie_key.and_then(|key| decrypt(&encrypted, &key, &host, version))
         };
-        let expires = if expires_utc > 0 {
-            (expires_utc / 1_000_000 - 11_644_473_600).max(0)
-        } else {
-            0
-        };
-        cookies.push(Cookie {
-            host,
-            name,
-            value,
-            path,
-            secure,
-            expires,
+        let Some(value) = value else { continue };
+        if value.contains(['\r', '\n', '\0']) { continue }
+        cookies.push(Cookie { host, name, value, path, secure,
+            expires: if expires_utc == 0 { 0 } else { expires_utc / 1_000_000 - 11_644_473_600 },
         });
     }
-    if failed > 0
-        && cookies
-            .iter()
-            .all(|c| c.name != "SAPISID" && c.name != "__Secure-3PAPISID")
-    {
-        bail!("{failed} cookies could not be decrypted; the browser's key did not match");
+    let session = Session { source: candidate.label(), profile: candidate.id(), cookies };
+    if session.sapisid().is_none_or(str::is_empty) {
+        bail!("The browser's YouTube cookies could not be decrypted. Sign in again, then Reconnect");
     }
-    log::info!(
-        "read {} cookies from {} ({}), {failed} undecryptable",
-        cookies.len(),
-        candidate.browser.name,
-        candidate.profile
-    );
-    Ok(Some(Session {
-        source: candidate.label(),
-        profile: candidate.id(),
-        cookies,
-    }))
+    Ok(Some(session))
 }
 
+#[cfg(target_os = "macos")]
+fn keyring_password(service: &str) -> Result<Vec<u8>> {
+    let output = Command::new("/usr/bin/security")
+        .args(["find-generic-password", "-w", "-s", service])
+        .stdin(Stdio::null()).stderr(Stdio::null()).output()
+        .context("Could not open macOS Keychain")?;
+    if !output.status.success() || output.stdout.is_empty() {
+        bail!("Allow access to {service} in Keychain, then Reconnect. No other account was selected");
+    }
+    Ok(trim_command_newline(output.stdout))
+}
+
+#[cfg(target_os = "linux")]
 fn keyring_password(application: &str) -> Result<Vec<u8>> {
-    let output = Command::new("secret-tool")
-        .args(["lookup", "application", application])
-        .output()
+    let output = Command::new("secret-tool").args(["lookup", "application", application])
+        .stdin(Stdio::null()).stderr(Stdio::null()).output()
         .context("running secret-tool (libsecret)")?;
-    let mut password = output.stdout;
-    while password.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
-        password.pop();
-    }
-    if password.is_empty() {
-        // Chromium falls back to this fixed password without a keyring.
-        return Ok(b"peanuts".to_vec());
-    }
-    Ok(password)
+    let password = trim_command_newline(output.stdout);
+    // Retain Chromium's Linux fallback. It is NEVER used on macOS.
+    Ok(if password.is_empty() { b"peanuts".to_vec() } else { password })
 }
 
-fn derive_key(password: &[u8]) -> [u8; 16] {
+fn trim_command_newline(mut password: Vec<u8>) -> Vec<u8> {
+    if password.last() == Some(&b'\n') { password.pop(); }
+    password
+}
+
+fn derive_key(password: &[u8], iterations: u32) -> [u8; 16] {
     let mut key = [0u8; 16];
-    pbkdf2::pbkdf2_hmac::<sha1::Sha1>(password, b"saltysalt", 1, &mut key);
+    pbkdf2::pbkdf2_hmac::<sha1::Sha1>(password, b"saltysalt", iterations, &mut key);
     key
 }
 
@@ -375,14 +282,12 @@ fn decrypt(encrypted: &[u8], key: &[u8; 16], host: &str, version: i64) -> Option
     };
     let decryptor = cbc::Decryptor::<aes::Aes128>::new(key.into(), &[b' '; 16].into());
     let plain = decryptor.decrypt_padded_vec_mut::<Pkcs7>(body).ok()?;
-    // Schema 24 prefixes the value with SHA-256 of its host.
-    let plain = if version >= 24
-        && plain.len() >= 32
-        && plain[..32] == sha2::Sha256::digest(host.as_bytes())[..]
-    {
+    let value = if version >= 24 {
+        if plain.get(..32)? != &sha2::Sha256::digest(host.as_bytes())[..] { return None }
         &plain[32..]
-    } else {
-        &plain[..]
-    };
-    String::from_utf8(plain.to_vec()).ok()
+    } else { &plain };
+    String::from_utf8(value.to_vec()).ok()
 }
+
+#[cfg(test)]
+mod tests;
