@@ -13,36 +13,7 @@ env:
   CARGO_BUILD_JOBS: 2
   CARGO_TERM_COLOR: always
 jobs:
-  prepare:
-    # One-time port bootstrap; removed once the resolved lockfile is committed.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/port/macos'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    outputs:
-      sha: ${{ steps.prepare.outputs.sha }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-      - run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt && rustup default 1.98.0
-      - id: prepare
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo fmt --all
-          cargo metadata --format-version 1 > /dev/null
-          if ! git diff --quiet -- Cargo.lock src; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add Cargo.lock src
-            git commit -m 'Resolve macOS dependencies and format the port'
-            git push origin HEAD:port/macos
-          fi
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
   check:
-    needs: prepare
-    if: always() && (needs.prepare.result == 'success' || needs.prepare.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
@@ -52,21 +23,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.sha || github.sha }}
           persist-credentials: false
       - run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt,clippy && rustup default 1.98.0
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: native-${{ runner.os }}-${{ runner.arch }}-1.98-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: native-${{ runner.os }}-${{ runner.arch }}-1.98-${{ hashFiles('Cargo.lock') }}-
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev
       - if: runner.os == 'macOS'
-        run: brew install cmake
+        run: brew install cmake mpv yt-dlp deno
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --all-targets --features e2e -- -D warnings
-      - run: cargo test --locked --features e2e
-      - run: cargo run --locked -- --help
+      - run: cargo test --locked --release --features e2e
+      - run: cargo run --locked --release -- --help
       - if: runner.os == 'macOS'
         run: |
           rustup target add aarch64-apple-darwin
           CARGO_BUILD_TARGET=aarch64-apple-darwin scripts/build-macos.sh
+      - if: runner.os == 'macOS'
+        name: Native window and CLI smoke test (signed out)
+        run: scripts/smoke-macos.sh
       - if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:

@@ -1,5 +1,6 @@
 /target
 /artifacts
+/dist
 # Never commit account material.
 *cookies*.txt
 /notes

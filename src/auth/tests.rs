@@ -1,10 +1,13 @@
 use super::*;
 
 fn bytes(hex: &str) -> Vec<u8> {
-    hex.as_bytes()
-        .chunks_exact(2)
-        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
-        .collect()
+    let (pairs, remainder) = hex.as_bytes().as_chunks::<2>();
+    assert!(remainder.is_empty());
+    let mut decoded = Vec::with_capacity(pairs.len());
+    for pair in pairs {
+        decoded.push(u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap());
+    }
+    decoded
 }
 
 // Independently generated with Python hashlib + cryptography, not the code under test.
