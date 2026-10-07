@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-10-07T05:27:13Z",
+  "implementation_commit": "b8e6d0cb2ba66f6f4c8dd9397a6c6dad0b308525",
+  "workflow": {
+    "name": "Native checks",
+    "run_id": 37575953091,
+    "macos_job": "success",
+    "linux_job": "success"
+  },
+  "resource_comparison": {
+    "method": "same macOS ARM64 GitHub Actions runner; isolated empty homes; signed out; settled idle; old visible window versus new menu-only app",
+    "baseline_commit": "837ad95184f279d0dcf722735f53fe72596a1f1a",
+    "baseline_rss_bytes": 173785088,
+    "menubar_rss_bytes": 32653312,
+    "rss_reduction_percent": 81.2,
+    "standalone_idle_rss_bytes": 32686080,
+    "standalone_idle_physical_footprint_bytes": 10749888,
+    "limits": "Synthetic signed-out comparison. Excludes shared OS helpers and temporary resolver processes. Does not predict live playback memory on a user's Mac."
+  },
+  "native_menu_self_test": {
+    "result": "pass",
+    "checks": [
+      "prelaunch_wake",
+      "one_status_item",
+      "shuffle_dispatch",
+      "editable_only",
+      "captured_song",
+      "bounded_playlist_menus",
+      "signed_out_gating"
+    ]
+  },
+  "verified": [
+    "renderer-free dependency graph",
+    "strict menubar Clippy",
+    "menubar unit tests",
+    "retained Linux desktop checks",
+    "production mpv IPC audio transport",
+    "Swift/AppKit build and packaging",
+    "ad-hoc signature",
+    "signed-out launch",
+    "CLI Show and Quit",
+    "no idle mpv, yt-dlp or deno child"
+  ],
+  "not_verified": [
+    "real browser and Keychain authentication",
+    "real account playlist writes",
+    "audible gapless playback on the user's device",
+    "Bluetooth and device routing",
+    "live-session memory on the user's Mac"
+  ]
+}
