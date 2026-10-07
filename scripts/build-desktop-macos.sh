@@ -4,7 +4,7 @@ set -euo pipefail
 [[ "$(uname -s)" == Darwin ]] || { echo 'Build this app on macOS.' >&2; exit 1; }
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo"
-for tool in cargo rustc swiftc codesign ditto plutil; do
+for tool in cargo rustc cmake codesign ditto plutil; do
   command -v "$tool" >/dev/null || { echo "Missing build tool: $tool" >&2; exit 1; }
 done
 target="${CARGO_BUILD_TARGET:-$(rustc -vV | sed -n 's/^host: //p')}"
@@ -15,20 +15,14 @@ case "$target" in
 esac
 export MACOSX_DEPLOYMENT_TARGET=13.0
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
-cargo build --locked --release --lib --no-default-features --features menubar --target "$target"
+cargo build --locked --release --target "$target"
 target_dir="${CARGO_TARGET_DIR:-$repo/target}"
 mkdir -p "$repo/dist" "$repo/target"
 staging="$(mktemp -d "$repo/target/macos-package.XXXXXX")"
 trap 'rm -rf "$staging"' EXIT
 app="$staging/YTfast.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-swiftc -swift-version 5 -O -whole-module-optimization \
-  -target "$arch-apple-macosx13.0" -import-objc-header native/Bridge.h native/main.swift \
-  "$target_dir/$target/release/libytfast.a" -o "$app/Contents/MacOS/ytfast" \
-  -framework AppKit -framework MediaPlayer -framework Security \
-  -framework SystemConfiguration -framework CoreFoundation -lc++ -lresolv -liconv \
-  -Xlinker -dead_strip
-chmod 755 "$app/Contents/MacOS/ytfast"
+install -m 755 "$target_dir/$target/release/ytfast" "$app/Contents/MacOS/ytfast"
 install -m 644 LICENSE "$app/Contents/Resources/LICENSE"
 install -m 644 assets/icons/LICENSE.txt "$app/Contents/Resources/Lucide-LICENSE.txt"
 version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -1)"
@@ -45,7 +39,6 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <key>CFBundleShortVersionString</key><string>$version</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
-<key>LSUIElement</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>
 PLIST

@@ -1,111 +1,98 @@
-# macOS port
+# Native menu-bar build
 
-This fork starts from MayberryDT/ytfast `8c10cc2c9afe47d4e35922b566f1af8d4431bb49`.
-The port is additive: the upstream player, API client, queues, account operations,
-lyrics, equalizer, animations and `app.rs` state machine are retained. This file
-supersedes the macOS exclusion in the upstream SPEC and its Linux-specific paths.
+## Accepted direction
 
-## Build and launch
+2026-10-07: the user reported 421 MB for YTfast (plus a separately shown 13.1 MB
+AutoFill helper) and chose a basic menu over the full UI. That screenshot is a
+user observation, not an allocation profile or a benchmark of all helper processes.
+The requested features are transport, shuffle, playlist/library selection and adding
+the current song to a playlist. This supersedes the original desktop-UI Mac scope.
 
-Requires macOS 13+, Xcode Command Line Tools, Rust 1.98+ and Homebrew.
-Install the command-line tools with `xcode-select --install` when absent.
+## Implementation
 
-```sh
-brew install cmake mpv yt-dlp deno
-git clone https://github.com/Xon333/ytfast-macos.git
-cd ytfast-macos
-scripts/build-macos.sh
-open dist/YTfast.app
-```
+The Mac package is a single Swift/AppKit executable linked with the existing Rust
+backend as a static library. Cargo's `menubar` build excludes egui, eframe, winit,
+GPU backends, image decoders, fonts and the desktop theme/tray stack. Those remain
+behind `desktop-ui` for Linux and the optional legacy interface. Authentication,
+playlist parsing, queue, seek, gapless mpv playback, quality selection, normalization
+and session persistence are reused instead of introducing a second music engine.
 
-The builder makes a native `dist/YTfast.app` and an architecture-labelled ZIP.
-It defaults to two compiler jobs; change `CARGO_BUILD_JOBS` explicitly to override.
-An Apple Silicon Mac builds ARM64; an Intel Mac builds x86_64. CI builds the
-Apple Silicon package. `CARGO_BUILD_TARGET` can select another installed Mac target.
+There is one NSStatusItem with native menus. No artwork is fetched, no Home feed or
+lyrics are loaded, and no window renders in the background. Backend notifications
+wake the main queue; they are coalesced rather than serviced by a polling timer.
+Library pages are requested on opening their menus, refreshed after five minutes,
+and retained in an eight-page cache. Native submenus show 40 entries at a time.
+API continuations expose Load more; a 1,000-row page ceiling is explicitly labelled.
+Only server-confirmed editable playlists can accept Add. The action captures the
+song ID at menu-open time; it never substitutes a newly playing song. Pending/success
+and refusal states are distinct. It does not delete or create playlists.
 
-This is a locally/ad-hoc-signed app, not a notarized distribution. It uses the
-installed `mpv`, `yt-dlp` and `deno`; these are not inside the ZIP. Finder launches
-get both standard Homebrew prefixes without loading or editing shell profiles.
-Missing runtime tools produce an actionable alert rather than a silent launch.
-The bundle is called **YTfast** to avoid colliding with Apple's Music.app.
+Only the current/next tracks are resolved. No screen/hover or two-ahead speculation,
+startup resolution of paused sessions, extra audition deck, or crossfade deck runs
+in this build. A saved crossfade preference is not overwritten. The native mpv
+forward buffer is capped at 4 MiB, back buffer at 1 MiB, and read-ahead at 60 seconds;
+this does not lower the codec/bitrate. Buffer sizes are not total process memory.
+Resolved URLs are retained in a 32-entry cache rather than the whole listening history.
 
-## Sign in
+Native MPRemoteCommandCenter/Now Playing controls drive the same Rust state as the
+menu. The mpv helper has `input-media-keys=no`, avoiding separate ownership by the
+helper. macOS may still show its global circular Now Playing menu alongside the
+app's music-note menu. These cannot be merged into one OS process or status item;
+this app does not change the user's global menu-bar settings.
 
-Sign in to YouTube Music in Google Chrome, Brave or Chromium, then launch YTfast.
-Allow the browser's Safe Storage item when macOS Keychain asks. Settings →
-Reconnect reads the current browser session again. No headers or cookie exports
-need to be supplied manually. Safari and Firefox sessions are not supported.
+## Sonora review
 
-The browser roots are under `~/Library/Application Support`:
-`Google/Chrome`, `BraveSoftware/Brave-Browser`, and `Chromium`.
-Both `Network/Cookies` and legacy `Cookies` profiles are discovered. The browser
-is never restarted. SQLite is opened read-only and read in a transaction, including
-its WAL, instead of copying a changing database and journal separately.
+Reviewed `sonorahq/sonora` at `9f6567874582749b675a59ee705a8447191da6b6`:
 
-Profile listing never unlocks Keychain. Only loading the chosen/default session
-requests its key. A missing selected profile or denied key does not silently
-switch accounts; select an available profile in Settings, or Reconnect after
-allowing access. The account-only API request, not cookie presence, decides
-whether the UI says signed in.
+- `CLAUDE.md` and `crates/music/src/engine.rs`: provider/playback code independent
+  of the GPUI interface, one shared player owner. Applied by extracting shared
+  account/desktop types and building the existing engine without desktop dependencies.
+- `crates/state/src/playback.rs` (`preload_next`, `preload_upcoming`): prepare the
+  relevant next track rather than UI-wide speculative work. The existing yt-dlp
+  resolver is kept because it already implements this fork's signed-in quality path.
+- `crates/music/src/stream.rs`: bounded buffering and explicit resource ceilings.
+  Adopted the principle using mpv's supported audio buffer controls; did not import
+  Sonora's disk spool, decoder stack, GPUI, WebView login or other service providers.
 
-macOS uses `security find-generic-password -w -s '<Browser> Safe Storage'`, privately
-captured, and PBKDF2-SHA1 with `saltysalt`, 1003 rounds, a 16-byte AES key and an IV
-of 16 spaces. Only v10 is accepted on macOS. Schema 24+ must have the matching
-host SHA-256 prefix. Linux keeps its separate v10/v11 derivation. No macOS
-fallback to the Linux `peanuts` password exists.
+These are architecture references, not copied source. Sonora is GPL-3.0-or-later;
+no GPL code was incorporated and the fork remains MIT. Primary source:
+https://github.com/sonorahq/sonora/tree/9f6567874582749b675a59ee705a8447191da6b6
+mpv option semantics: https://mpv.io/manual/stable/#demuxer
+mpv media-key owner: https://github.com/mpv-player/mpv/blob/master/osdep/mac/remote_command_center.swift
 
-Source references checked for this port:
-- [yt-dlp's Mac cookie decryption and browser mappings](https://github.com/yt-dlp/yt-dlp/blob/master/yt_dlp/cookies.py).
-- [fastframe-tray v0.2.2](https://github.com/crmne/fastframe/blob/v0.2.2/crates/fastframe-tray/README.md): main-thread attach, menu events, Dock reopen and headless AppKit pump.
-- [fastframe-shell v0.2.2](https://github.com/crmne/fastframe/blob/v0.2.2/crates/fastframe-shell/README.md): resident state across window close/recreation.
+## Install and paths
 
-## Desktop behaviour
+Install `mpv`, `yt-dlp`, `deno` through Homebrew. Quit the previous app, replace
+`/Applications/YTfast.app`, and reopen. There is no ordinary window or Dock icon.
+Bundle ID stays `io.github.xon333.ytfast`; settings and queue remain under
+`~/Library/Application Support/ytfast` and `~/Library/Caches/ytfast`. The runtime
+socket/export directory stays `/tmp/ytfast-<uid>`, private mode 0700, exports 0600.
+No migration clears the user's queue, settings or old cache. Old cover files are
+left on disk but are not loaded. No new Keychain storage or sign-in server exists.
 
-Closing the window with a queue keeps the session alive; closing with no queue
-quits, as upstream does. Click the menu-bar note or Dock icon to reopen. Right-click
-the note for Play/Pause, Next, Previous, Show and Quit. The item stays available
-while the main window is open too. No new playback implementation is involved.
+The local browser Safe Storage secret decrypts cookies locally; authenticated
+cookies go to YouTube/Google. Keys/cookies must never enter logs, artifacts or Git.
+Cached account pages from the old unscoped disk cache are not shown by the native
+menu; fresh authenticated requests determine library contents and write access.
 
-Command+Q quits, Command+W closes, Command+M minimizes. Use Control+M or the existing
-mini-player button to switch to the always-on-top mini player. Command+K and
-Command+, use the existing command/search and Settings handlers. The upstream
-shortcut overlay still labels those shared chords as Ctrl. CLI commands work via
-`dist/YTfast.app/Contents/MacOS/ytfast show|toggle|next|previous|quit`.
+`Account` contains Reconnect and the existing browser-profile selector. Closing a
+menu never quits audio; Quit YTfast/Command+Q or CLI `ytfast quit` saves and stops it.
+The native executable also accepts existing transport and Show CLI commands.
 
-The existing neutral **dark** palette is the macOS default. Automatic system
-light/dark following, macOS Control Center/Now Playing and global hardware media
-keys, native song notifications, URL-scheme registration and a bespoke native
-application menu are outside this first port. The notification setting is disabled
-rather than falsely reporting support. Linux MPRIS, notifications, tray and Omarchy
-remain platform-gated and available on Linux.
+## Verification boundaries
 
-## Files and privacy
+CI checks the renderer-free dependency graph, strict Rust Clippy, unit tests,
+Swift compilation, architecture, ad-hoc signature and package. Native AppKit tests
+check one status item, shuffle dispatch, editable-only destinations, captured song
+IDs and signed-out gating. An isolated signed-out launch checks CLI Show/Quit and
+absence of idle playback/resolver children. In-process task_info records RSS and
+physical footprint without any account data. A synthetic local-WAV test runs the
+production mpv IPC/options, checks pause/seek/resume, queue transitions and exit;
+null audio output is enabled only in Rust test builds.
 
-| Data | macOS location |
-| --- | --- |
-| Settings and theme directory | `~/Library/Application Support/ytfast` |
-| Pages, covers, session and logs | `~/Library/Caches/ytfast` |
-| Runtime IPC and temporary session exports | `/tmp/ytfast-<uid>` |
-
-The short runtime path avoids macOS Unix-socket path limits. Directories must be
-real directories owned by this user and are restricted to 0700; exported cookies
-and atomic writes are 0600. Schema/cookie failures contain no cookie or key values.
-Normal exit removes session exports; startup removes leftovers from an interrupted
-run. Persistent settings and library cache are not removed. An OS-held instance
-lock protects concurrent launches and is released on a crash.
-
-## Verification
-
-The `Native checks` workflow is the build/test evidence for each commit; a source
-change or green compilation is not proof of live playback. It checks formatting,
-strict Clippy including the E2E feature, Rust tests, CLI startup and Mac packaging.
-Synthetic tests cover independent cookie/KDF vectors, wrong-host/corrupted data,
-domain boundaries, strict profile selection, private exports and filesystem paths.
-No CI job accesses a real browser account.
-
-On the target Mac, the remaining interactive acceptance pass is: launch from
-Finder; allow/deny Keychain access; confirm the selected account; play a queue across
-three track changes and seek; close/reopen via the menu bar and Dock; switch the
-mini player; quit and confirm playback stops. Use an ordinary listening session;
-no destructive playlist/like test is required. Keep account screenshots/logs under
-the ignored `artifacts/` directory, never in a commit.
+These checks do not prove live YouTube authentication, real playlist writes,
+audible gapless quality, Bluetooth routing or your machine's memory use. The final
+live check is normal listening: select a playlist, toggle shuffle, add a song to
+an owned playlist and confirm it in YouTube Music. No destructive account tests
+are run automatically. The GitHub Actions result is the evidence per commit; this
+document alone is not a claim that every test has run.

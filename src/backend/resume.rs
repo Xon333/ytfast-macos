@@ -126,6 +126,9 @@ impl super::Worker {
     /// Once the session is known (at launch): resolve the restored song for
     /// playback and fetch its loudness, so Play starts at once.
     pub(super) fn prepare_restored(&mut self) {
+        if cfg!(feature = "menubar") {
+            return; // Start external resolver processes only when Play is requested.
+        }
         if self.current_entry.is_some() || self.state.loading || self.resolving.is_some() {
             return;
         }

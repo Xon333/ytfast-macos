@@ -1,50 +1,38 @@
 #!/bin/bash
-# CI-only native window smoke test; no browser account or injected playback.
+# Fresh-runner native menu smoke test. No real account is accessed.
 set -euo pipefail
-[[ "$(uname -s)" == Darwin && "${GITHUB_ACTIONS:-}" == true ]] || {
-  echo 'Run this smoke test only on a fresh macOS GitHub runner.' >&2; exit 2;
-}
+[[ "$(uname -s)" == Darwin && "${GITHUB_ACTIONS:-}" == true ]] || exit 2
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 binary="$repo/dist/YTfast.app/Contents/MacOS/ytfast"
-[[ -x "$binary" ]] || { echo 'Build the app first.' >&2; exit 1; }
-[[ ! -S "/tmp/ytfast-$(id -u)/ytfast.sock" ]] || {
-  echo 'A ytfast socket already exists; refusing to touch another session.' >&2; exit 1;
-}
-test_home="$(mktemp -d)"
+mkdir -p "$repo/artifacts/native"
+"$binary" --self-test > "$repo/artifacts/native/menu-tests.json"
+[[ ! -S "/tmp/ytfast-$(id -u)/ytfast.sock" ]] || { echo 'Another instance is active.' >&2; exit 1; }
+home="$(mktemp -d)"
 pid=''
 cleanup() {
-  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-    kill "$pid" 2>/dev/null || true
-  fi
-  rm -rf "$test_home"
+  [[ -z "$pid" ]] || kill "$pid" 2>/dev/null || true
+  rm -rf "$home"
 }
 trap cleanup EXIT
-# The empty home contains no browser profiles. A stripped PATH exercises the
-# same dependency lookup required for Finder, without sourcing shell profiles.
-export HOME="$test_home"
+export HOME="$home"
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
-"$binary" > "$test_home/stdout.log" 2> "$test_home/stderr.log" &
+export YTFAST_PROFILE_FILE="$repo/artifacts/native/idle-memory.json"
+"$binary" > "$home/stdout" 2> "$home/stderr" &
 pid=$!
-log="$test_home/Library/Caches/ytfast/ytfast.log"
-for _ in {1..60}; do
-  if [[ -f "$log" ]] && grep -q 'first frame' "$log"; then break; fi
-  kill -0 "$pid" 2>/dev/null || {
-    cat "$test_home/stderr.log" >&2; echo 'App exited before its first frame.' >&2; exit 1;
-  }
+for _ in {1..45}; do
+  [[ -f "$YTFAST_PROFILE_FILE" ]] && break
+  kill -0 "$pid" 2>/dev/null || { cat "$home/stderr"; exit 1; }
   sleep 1
 done
-[[ -f "$log" ]] && grep -q 'first frame' "$log" || {
-  cat "$test_home/stderr.log" >&2; echo 'No native frame appeared.' >&2; exit 1;
-}
+[[ -f "$YTFAST_PROFILE_FILE" ]] || { cat "$home/stderr"; echo 'No native main-loop sample.'; exit 1; }
+ps -p "$pid" -o pid=,rss=,%cpu=,comm= > "$repo/artifacts/native/idle-process.txt"
+# A restored, paused native session does not spawn playback/resolution helpers.
+if pgrep -P "$pid" 'mpv|yt-dlp|deno' > /dev/null; then echo 'Unexpected idle playback helper'; exit 1; fi
 "$binary" show
+sleep 1
 "$binary" quit
-for _ in {1..20}; do
-  kill -0 "$pid" 2>/dev/null || break
-  sleep 1
-done
-if kill -0 "$pid" 2>/dev/null; then
-  echo 'The app did not stop after the CLI Quit request.' >&2; exit 1
-fi
+for _ in {1..20}; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+if kill -0 "$pid" 2>/dev/null; then echo 'Quit did not stop the app'; exit 1; fi
 wait "$pid"
 pid=''
-printf 'PASS: native ARM64 window drew a frame with an empty home and Finder-style PATH; Show and Quit returned cleanly.\n'
+printf 'PASS: native menu, synthetic actions, isolated startup, no idle playback helpers, CLI Show/Quit.\n'

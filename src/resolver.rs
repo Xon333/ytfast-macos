@@ -308,6 +308,9 @@ impl Resolver {
     /// Resolves likely songs ahead of a click, most likely first, without
     /// taking a playback slot.
     pub fn prepare_many(self: &Arc<Self>, mut video_ids: Vec<String>) {
+        if cfg!(feature = "menubar") {
+            return;
+        }
         #[cfg(feature = "e2e")]
         if crate::e2e::offline() {
             return;
@@ -337,6 +340,9 @@ impl Resolver {
     }
 
     pub fn prepare(self: &Arc<Self>, video_id: &str) {
+        if cfg!(feature = "menubar") {
+            return;
+        }
         self.prepare_many(vec![video_id.to_owned()]);
     }
 
@@ -470,7 +476,22 @@ impl Resolver {
     }
 
     fn store(&self, video_id: &str, stream: &Stream, signed_in: bool) {
-        self.cache.lock().expect("cache lock").insert(
+        let mut cache = self.cache.lock().expect("cache lock");
+        if cfg!(feature = "menubar") {
+            cache.retain(|_, item| item.expires > now() + MARGIN);
+            while cache.len() >= 32 {
+                let oldest = cache
+                    .iter()
+                    .min_by_key(|(_, item)| item.expires)
+                    .map(|(id, _)| id.clone());
+                if let Some(id) = oldest {
+                    cache.remove(&id);
+                } else {
+                    break;
+                }
+            }
+        }
+        cache.insert(
             video_id.to_owned(),
             Cached {
                 itag: stream.itag,
@@ -480,6 +501,7 @@ impl Resolver {
                 signed_in,
             },
         );
+        drop(cache);
         self.save();
     }
 
@@ -527,12 +549,13 @@ impl Resolver {
         }
         // Guesses yield the CPU to playback's runs.
         let mut command = if speculative {
-            let mut nice = tokio::process::Command::new("nice");
-            nice.args(["-n", "10", "yt-dlp"]);
+            let mut nice = tokio::process::Command::new("/usr/bin/nice");
+            nice.args(["-n", "10"]).arg(crate::platform::tool("yt-dlp"));
             nice
         } else {
-            tokio::process::Command::new("yt-dlp")
+            tokio::process::Command::new(crate::platform::tool("yt-dlp"))
         };
+        command.env("PATH", crate::platform::tool_path());
         command.args([
             "--ignore-config",
             "--no-warnings",

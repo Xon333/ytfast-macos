@@ -1,5 +1,10 @@
 # ytfast agent guide
 
+## Current direction (2026-10-07)
+
+The user explicitly replaced the desktop-UI goal for macOS with a minimal native menu. The Mac release builds with `--no-default-features --features menubar`: no egui, eframe, GPU renderer, artwork loading, or full window. Retain the shared Rust audio/API/auth core. AppKit is a thin in-process menu, not a second player. Sonora is an architectural reference, not a dependency or copied implementation; see docs/MACOS.md. Preserve the legacy desktop UI behind `desktop-ui` for Linux/development. This direction overrides conflicting earlier UI/tray constraints below. Tests and CI must stay read-only after the one-time migration.
+
+
 ytfast is a native YouTube Music client: Rust + egui on [fastframe](https://github.com/crmne/fastframe), modelled on ZapFast and Spotifast. It has no browser engine, no telemetry and no server of its own. Shown in the window as "Music"; the Mac bundle is "YTfast".
 
 ## Start here

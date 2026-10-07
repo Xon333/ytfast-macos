@@ -437,7 +437,10 @@ impl Worker {
     fn new(client: Arc<Client>, resolver: Arc<Resolver>, paths: Paths, sink: Sink) -> Self {
         let (internal_tx, internal_rx) = mpsc::unbounded_channel();
         let (mpv_tx, mpv_rx) = mpsc::unbounded_channel();
-        let settings = crate::settings::Settings::load(&paths);
+        let mut settings = crate::settings::Settings::load(&paths);
+        if cfg!(feature = "menubar") {
+            settings.mixes.on = false;
+        }
         Self {
             client,
             resolver,

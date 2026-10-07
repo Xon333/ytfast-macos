@@ -1,5 +1,7 @@
 # Integration facts and design
 
+> macOS menu-bar scope and current verification: [MACOS.md](MACOS.md). The desktop-UI requirements below describe the retained legacy build.
+
 Read this before touching sign-in, playback or the build. Update it when a fact is disproven or a technical choice is made. Facts are dated because YouTube changes.
 
 ## Verified facts

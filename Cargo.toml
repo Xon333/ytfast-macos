@@ -1,6 +1,6 @@
 [package]
 name = "ytfast"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.98"
 description = "A native YouTube Music player for macOS and Linux, built with Rust and egui"
@@ -11,17 +11,17 @@ publish = false
 
 [dependencies]
 # Keep the upstream UI and renderer pins; no WebView or browser engine.
-eframe = { version = "0.36", default-features = false, features = ["accesskit", "glow", "default_fonts", "persistence"] }
-egui = "0.36"
-egui_extras = { version = "0.36", features = ["image", "svg"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "glow", "default_fonts", "persistence"] , optional = true }
+egui = { version = "0.36", optional = true }
+egui_extras = { version = "0.36", features = ["image", "svg"] , optional = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] , optional = true }
 # All fastframe crates, including the native tray, use the upstream tag.
-fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
-fastframe-icons = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
+fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" , optional = true }
+fastframe-icons = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" , optional = true }
 fastframe-log = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
-fastframe-text = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
-fastframe-theme = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
-fastframe-shell = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
+fastframe-text = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" , optional = true }
+fastframe-theme = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" , optional = true }
+fastframe-shell = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" , optional = true }
 anyhow = "1"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
@@ -40,25 +40,36 @@ sha1 = "0.10"
 sha2 = "0.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-eframe = { version = "0.36", default-features = false, features = ["wayland", "x11"] }
+eframe = { version = "0.36", default-features = false, features = ["wayland", "x11"] , optional = true }
 # Keep AccessKit and the Linux integrations on the same async-io reactor.
-zbus = { version = "5", default-features = false, features = ["async-io"] }
-ksni = { version = "0.3", default-features = false, features = ["async-io"] }
+zbus = { version = "5", default-features = false, features = ["async-io"] , optional = true }
+ksni = { version = "0.3", default-features = false, features = ["async-io"] , optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-fastframe-tray = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
+fastframe-tray = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" , optional = true }
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[[bin]]
+name = "ytfast"
+path = "src/main.rs"
+required-features = ["desktop-ui"]
 
 [features]
-e2e = []
+default = ["desktop-ui"]
+desktop-ui = ["dep:eframe", "dep:egui", "dep:egui_extras", "dep:image", "dep:fastframe-fonts", "dep:fastframe-icons", "dep:fastframe-text", "dep:fastframe-theme", "dep:fastframe-shell", "dep:fastframe-tray", "dep:zbus", "dep:ksni"]
+menubar = []
+e2e = ["desktop-ui"]
 
 [patch.crates-io]
 # Unchanged upstream pins, aligned with fastframe v0.2.2.
 ecolor = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-eframe = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-egui = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+eframe = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79"  }
+egui = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79"  }
 egui-wgpu = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
 egui-winit = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-egui_extras = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+egui_extras = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79"  }
 egui_glow = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
 emath = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
 epaint = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }

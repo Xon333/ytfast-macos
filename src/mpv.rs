@@ -71,7 +71,7 @@ impl Mpv {
     ) -> Result<Arc<Self>> {
         let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
         let _ = std::fs::remove_file(socket);
-        let mut child = tokio::process::Command::new("mpv")
+        let mut child = tokio::process::Command::new(crate::platform::tool("mpv"))
             .args([
                 "--idle=yes",
                 "--no-video",
@@ -81,10 +81,27 @@ impl Mpv {
                 "--gapless-audio=yes",
                 "--prefetch-playlist=yes",
                 "--cache=yes",
-                "--demuxer-max-bytes=64MiB",
+                if cfg!(feature = "menubar") {
+                    "--demuxer-max-bytes=4MiB"
+                } else {
+                    "--demuxer-max-bytes=64MiB"
+                },
+                "--audio-display=no",
                 "--audio-client-name=ytfast",
                 "--replaygain=no",
             ])
+            .args(if cfg!(feature = "menubar") {
+                &[
+                    "--input-media-keys=no",
+                    "--demuxer-max-back-bytes=1MiB",
+                    "--cache-secs=60",
+                    "--demuxer-readahead-secs=60",
+                ][..]
+            } else {
+                &[]
+            })
+            .args(if cfg!(test) { &["--ao=null"][..] } else { &[] })
+            .env("PATH", crate::platform::tool_path())
             .arg(format!("--volume={volume}"))
             .arg(format!("--input-ipc-server={}", socket.display()))
             .stdin(std::process::Stdio::null())
@@ -237,3 +254,7 @@ async fn connect(socket: &Path, child: &mut tokio::process::Child) -> Result<Uni
     }
     bail!("mpv's control socket did not appear")
 }
+
+#[cfg(all(test, feature = "menubar"))]
+#[path = "mpv_tests.rs"]
+mod tests;
