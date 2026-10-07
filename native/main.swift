@@ -3,6 +3,7 @@
 import AppKit
 import MediaPlayer
 import Darwin
+import CoreFoundation
 
 struct Song: Codable, Equatable { var id: String; var title: String; var artist: String }
 struct Profile: Codable, Equatable { var id: String; var label: String }
@@ -44,6 +45,14 @@ final class CoreAPI: PlayerAPI {
     }
 }
 
+// NSMenu runs a nested event-tracking loop, which does not drain GCD's main
+// queue. Deliver backend/media work in common modes so an open menu stays live.
+func onMainRunLoop(_ action: @escaping () -> Void) {
+    let loop = CFRunLoopGetMain()
+    CFRunLoopPerformBlock(loop, CFRunLoopMode.commonModes.rawValue, action)
+    CFRunLoopWakeUp(loop)
+}
+
 // Worker callbacks are coalesced. Nothing polls or repaints while the app is idle.
 let wakeLock = NSLock()
 var wakeQueued = false
@@ -55,7 +64,7 @@ func nativeWake() {
     if wakeQueued { wakeLock.unlock(); return }
     wakeQueued = true
     wakeLock.unlock()
-    DispatchQueue.main.async {
+    onMainRunLoop {
         wakeLock.lock(); wakeQueued = false; wakeLock.unlock()
         applicationDelegate?.refresh()
     }
@@ -68,7 +77,7 @@ final class ActionBox: NSObject {
 
 enum MenuRole {
     case page(target: String, key: String, offset: Int)
-    case add
+    case add(offset: Int)
     case settings
     case volume
 }
@@ -146,7 +155,7 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         library.addItem(submenuItem("Liked Music", role: .page(target:browseTarget("FEmusic_liked_videos"), key:"browse:FEmusic_liked_videos:", offset:0)))
         library.addItem(submenuItem("Albums", role: .page(target:browseTarget("FEmusic_liked_albums"), key:"browse:FEmusic_liked_albums:", offset:0)))
         libraryItem.submenu = library; menu.addItem(libraryItem)
-        addItem.submenu = newMenu(.add); menu.addItem(addItem)
+        addItem.submenu = newMenu(.add(offset: 0)); menu.addItem(addItem)
         menu.addItem(messageItem); messageItem.isHidden = true
         messageItem.target = self; messageItem.action = #selector(copyMessage(_:))
         menu.addItem(.separator())
@@ -225,16 +234,16 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 guard let nativeMenu = ref.menu else {continue}
                 switch ref.role {
                 case let .page(_, key, _) where old[key] != pages[key]: build(nativeMenu, ref.role)
-                case .add where old[playlistKey] != pages[playlistKey]: build(nativeMenu, .add)
+                case .add(_) where old[playlistKey] != pages[playlistKey]: build(nativeMenu, ref.role)
                 default: break
                 }
             }
         }
         if !testing { updateNowPlaying() }
         if next.quit {
-            if !testing { NSApplication.shared.terminate(nil) }
+            if !testing { menu.cancelTracking(); NSApplication.shared.terminate(nil) }
         } else if next.show && !testing {
-            DispatchQueue.main.async { [weak self] in self?.status.button?.performClick(nil) }
+            onMainRunLoop { [weak self] in self?.status.button?.performClick(nil) }
         }
     }
 
@@ -248,7 +257,7 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch role {
         case let .page(target, _, offset) where offset == 0:
             if let next = api.send(["op":"browse", "target":target]) { apply(next) }
-        case .add:
+        case .add(0):
             addOpen = true; capturedSong = state.track
             if let next = api.send(["op":"browse", "target":browseTarget(playlistID)]) { apply(next) }
         default: break
@@ -257,7 +266,7 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func menuDidClose(_ menu: NSMenu) {
-        if case .add? = dynamic.first(where: {$0.menu === menu})?.role { addOpen = false }
+        if case .add(0)? = dynamic.first(where: {$0.menu === menu})?.role { addOpen = false }
     }
 
     private func build(_ menu: NSMenu, _ role: MenuRole) {
@@ -291,17 +300,21 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if offset == 0 {
                 menu.addItem(.separator());menu.addItem(item("Refresh",["op":"browse","target":target,"force":true]))
             }
-        case .add:
+        case let .add(offset):
             let song = addOpen ? capturedSong : state.track
             guard let song = song else {menu.addItem(item("Nothing playing"));return}
             menu.addItem(item("Add “\(song.title)” to:"))
             guard let page = pages[playlistKey] else {menu.addItem(item("Loading playlists…"));return}
             let owned = page.rows.filter {$0.editable != nil}
-            for row in owned {
+            for row in owned.dropFirst(offset).prefix(40) {
                 menu.addItem(item(row.title,["op":"add","playlist":row.editable!,"video":song.id]))
             }
             if owned.isEmpty {menu.addItem(item(page.loading ? "Loading playlists…" : "No editable playlists loaded"))}
-            if page.more {menu.addItem(item(page.loading ? "Loading…" : "Load more playlists…",page.loading ? nil : ["op":"more","key":playlistKey]))}
+            if owned.count > offset + 40 {
+                menu.addItem(submenuItem("More…", role: .add(offset: offset + 40)))
+            } else if page.more {
+                menu.addItem(item(page.loading ? "Loading…" : "Load more playlists…", page.loading ? nil : ["op":"more","key":playlistKey]))
+            }
             if let message=page.message {menu.addItem(item(message))}
             menu.addItem(.separator());menu.addItem(item("Refresh playlists",["op":"browse","target":browseTarget(playlistID),"force":true]))
         case .settings:
@@ -329,7 +342,7 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             (center.togglePlayPauseCommand,"toggle"),(center.nextTrackCommand,"next"),
             (center.previousTrackCommand,"previous")] {
             command.addTarget { [weak self] _ in
-                DispatchQueue.main.async {
+                onMainRunLoop {
                     guard let self = self, let next = self.api.send(["op":"transport","action":action]) else {return}
                     self.apply(next)
                 }
@@ -339,7 +352,7 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         center.changeShuffleModeCommand.addTarget { [weak self] event in
             guard let event = event as? MPChangeShuffleModeCommandEvent else {return .commandFailed}
             let wanted = event.shuffleType != .off
-            DispatchQueue.main.async {
+            onMainRunLoop {
                 guard let self = self, self.state.shuffle != wanted, let next = self.api.send(["op":"shuffle"]) else {return}
                 self.apply(next)
             }
@@ -373,8 +386,11 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func installSignals() {
         for number in [SIGTERM,SIGINT] {
             signal(number,SIG_IGN)
-            let source=DispatchSource.makeSignalSource(signal:number,queue:.main)
-            source.setEventHandler {NSApplication.shared.terminate(nil)}
+            let source=DispatchSource.makeSignalSource(signal:number,queue:.global(qos: .utility))
+            source.setEventHandler {onMainRunLoop {
+                applicationDelegate?.menu.cancelTracking()
+                NSApplication.shared.terminate(nil)
+            }}
             source.resume();signals.append(source)
         }
     }
@@ -443,11 +459,22 @@ func selfTest() {
     controller.choose(owned)
     precondition(api.sent.last?["video"] as? String == "abcdefghijk", "capture the displayed song")
     precondition(api.sent.last?["playlist"] as? String == "PLowned")
+    controller.menuDidClose(add)
+    api.state.pages![0].rows = (0..<85).map { Row(title:"Playlist \($0)",subtitle:"",play:nil,browse:nil,video:nil,editable:"PL\($0)") }
+    controller.refresh(); controller.menuWillOpen(add)
+    precondition(add.items.filter {($0.representedObject as? ActionBox)?.value["op"] as? String == "add"}.count == 40)
+    let more = add.items.first {$0.title == "More…"}!.submenu!
+    controller.menuWillOpen(more)
+    precondition(more.items.contains {$0.title == "Playlist 40"})
+    precondition(!more.items.contains {$0.title == "Playlist 0"})
+    controller.choose(more.items.first {$0.title == "Playlist 40"}!)
+    precondition(api.sent.last?["playlist"] as? String == "PL40")
+    precondition(api.sent.last?["video"] as? String == "lmnopqrstuv")
     precondition(controller.libraryItem.isEnabled)
     api.state.signed_in=false;api.state.pages=[];controller.refresh()
     precondition(!controller.libraryItem.isEnabled && !controller.addItem.isEnabled)
     precondition(controller.pages.isEmpty)
-    let payload:[String:Any]=["result":"pass","checks":["one_status_item","shuffle_dispatch","editable_only","captured_song","signed_out_gating"],"memory":memorySample()]
+    let payload:[String:Any]=["result":"pass","checks":["one_status_item","shuffle_dispatch","editable_only","captured_song","bounded_playlist_menus","signed_out_gating"],"memory":memorySample()]
     print(String(decoding:try! JSONSerialization.data(withJSONObject:payload,options:[.prettyPrinted,.sortedKeys]),as:UTF8.self))
     NSStatusBar.system.removeStatusItem(controller.status)
 }
