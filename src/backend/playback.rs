@@ -503,7 +503,9 @@ impl super::Worker {
                 self.state.loading = true;
                 self.state.playing = false;
                 self.emit(true);
-                match mpv.command(json!(["playlist-next", "force"])).await {
+                // Select the known entry absolutely: an EOF already queued
+                // on the event channel must not turn one Next into two skips.
+                match mpv.set("playlist-pos", json!(1)).await {
                     Ok(_) => {
                         self.appended = None;
                         self.current_entry = Some(appended.entry);

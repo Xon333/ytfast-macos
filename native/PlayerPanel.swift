@@ -165,8 +165,8 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         symbol(nextButton, "forward.end.fill", "Next", #selector(next(_:)), size: 32)
         symbol(addButton, "text.badge.plus", "Add song to playlist", #selector(addSong(_:)))
         let leftSpace = spacer(), rightSpace = spacer()
-        leftSpace.widthAnchor.constraint(equalTo: rightSpace.widthAnchor).isActive = true
         add(horizontal([shuffleButton, leftSpace, previousButton, playButton, nextButton, rightSpace, addButton]))
+        leftSpace.widthAnchor.constraint(equalTo: rightSpace.widthAnchor).isActive = true
         seek.target = self; seek.action = #selector(seekChanged(_:)); seek.isContinuous = false
         seek.controlSize = .small; seek.setAccessibilityLabel("Playback position")
         volume.target = self; volume.action = #selector(volumeChanged(_:)); volume.isContinuous = true
@@ -475,6 +475,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
 
     func makeAccountMenu() -> NSMenu {
         let menu = NSMenu(); menu.autoenablesItems = false
+        @discardableResult
         func item(_ title: String, _ action: Selector? = nil) -> NSMenuItem {
             let entry = NSMenuItem(title: title, action: action, keyEquivalent: "")
             entry.target = self; entry.isEnabled = action != nil; menu.addItem(entry); return entry

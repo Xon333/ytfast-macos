@@ -52,14 +52,23 @@ async fn native_audio_transport() {
     assert!((player.get("time-pos").await.unwrap().as_f64().unwrap() - 1.5).abs() < 0.3);
     player.load(file, "append", &[]).await.unwrap();
     player.load(file, "append", &[]).await.unwrap();
+    // Absolute Next is idempotent if natural advance already selected the
+    // same item. A relative playlist-next could skip it in that race.
+    player.set("playlist-pos", json!(1)).await.unwrap();
+    player.set("playlist-pos", json!(1)).await.unwrap();
     player.set("pause", json!(false)).await.unwrap();
     let mut starts = 0;
+    let mut entries = std::collections::HashSet::new();
     let deadline = Instant::now() + Duration::from_secs(12);
     while starts < 3 && Instant::now() < deadline {
-        if let Ok(Some((_, MpvEvent::StartFile { .. }))) =
+        if let Ok(Some((_, MpvEvent::StartFile { entry }))) =
             tokio::time::timeout(Duration::from_secs(2), events.recv()).await
         {
             starts += 1;
+            assert!(
+                entries.insert(entry),
+                "selecting the same entry must not restart it"
+            );
         }
     }
     assert_eq!(

@@ -1,131 +1,78 @@
 # YTfast for macOS
 
-A lean native **YouTube Music menu-bar player**.
+A lean native **YouTube Music menu-bar player**. One AppKit popover keeps playback controls, search and your library together.
 
-The macOS release is intentionally not a desktop music app: one AppKit status item controls the existing Rust YouTube Music/player core. No WebView, egui window, artwork cache or background rendering loop is shipped in the Mac package.
+**Previous · Play/Pause · Next · Shuffle · Seek · Volume · Search · Playlists · Liked Music · Albums**
 
-**Previous · Play/Pause · Next · Shuffle · Volume · Library · Add to playlist**
+![YTfast native macOS player](docs/screenshots/menu-bar-current.png)
 
-### Current macOS UI
-
-![YTfast native macOS menu-bar UI](docs/screenshots/menu-bar-current.png)
-
-*Actual AppKit menu captured from the current macOS build with fixture track data; no image from the upstream desktop fork.*
-
+*Captured from the native app with example music data.*
 
 ## Install
 
-Requirements:
+Install the audio and stream-resolution tools:
 
 ```sh
 brew install mpv yt-dlp deno
 ```
 
-Then:
+Quit YTfast, unzip the Apple Silicon build, replace `/Applications/YTfast.app`, and open it. Click the **music-note** item in the menu bar.
 
-1. Quit any old YTfast instance.
-2. Unzip the Apple Silicon build.
-3. Replace `/Applications/YTfast.app`.
-4. Open YTfast.
-5. Use the **music-note** item in the menu bar.
+The app supports macOS 13+ and is currently ad-hoc signed, without notarization.
 
-YTfast is currently ad-hoc signed, not notarized.
+### Connect your account
 
-### Sign in
+1. Open **Account → Open YouTube Music to sign in**. YTfast opens the selected supported browser.
+2. Sign in to YouTube Music in the selected **Chrome, Brave or Chromium** profile. The browser may initially open its last-used profile.
+3. Choose **Account → Reconnect**. Allow the browser's **Safe Storage** Keychain prompt if macOS asks.
+4. If access to the cookie store is blocked, use **Account → Full Disk Access…** to allow YTfast in System Settings, then quit and reopen YTfast.
 
-Sign in to YouTube Music in **Chrome, Brave or Chromium**, then use:
+Account shows the selected browser/profile and connection state. A failed selection never silently connects a different account. Safari and Firefox sessions are not supported.
 
-**YTfast → Account → Reconnect**
+The browser secret is read and used locally. Authenticated requests go directly to YouTube/Google; YTfast has no sign-in server.
 
-macOS may ask for:
+## Using the player
 
-- access to the browser's protected files;
-- the browser's **Safe Storage** Keychain item.
+- **Playback stays visible** while you browse. The progress and volume sliders, media keys and macOS Now Playing controls use the same player.
+- **Search or choose a library section** directly. Open playlists and albums inline, use Back to return, and Load more for additional results.
+- **Refresh keeps the current list usable.** Saved pages from the same browser session appear while fresh data loads.
+- **Add the playing song** with the plus control, then choose an editable playlist. The captured song stays the add target if playback advances.
+- **Loading and errors stay visible.** Play/Pause can cancel a pending start; closing the popover leaves playback running.
 
-The Safe Storage secret is read locally and used locally to decrypt the browser's YouTube cookies. YTfast does not have a sign-in server. Authenticated requests then go directly to YouTube/Google as normal.
+## Playback and resources
 
-Safari and Firefox sessions are not supported.
+The Rust core owns the queue, YouTube API, account writes and playback state. `yt-dlp` with Deno resolves audio, and `mpv` plays it. The native shell has no WebView, egui/eframe/winit renderer, artwork fetching or repaint loop.
 
-## What the Mac build does
+Current and next-track preparation overlap with player startup. Stream URLs and library snapshots are bounded and account-scoped. Premium-capable format selection is retained; enabled loudness normalization attenuates tracks without adding positive gain.
 
-### Playback
+The app restores its saved queue paused. Audio/resolver helpers start when playback is requested. macOS may also show its own global **Now Playing** item.
 
-- audio-only playback through `mpv`;
-- existing YouTube Music stream-quality selection;
-- current + next track preparation;
-- queue/session persistence;
-- pause, seek, next/previous, volume and shuffle;
-- macOS Now Playing / media-key integration.
-
-### Library
-
-The native menu exposes:
-
-- Playlists;
-- Liked Music;
-- Albums;
-- playlist/song selection;
-- **Add song to playlist** for server-confirmed editable playlists.
-
-Library data is loaded when the relevant menu is opened instead of keeping a full music UI resident.
-
-### Resource direction
-
-The Mac build deliberately excludes the desktop rendering stack:
-
-- no egui/eframe/winit renderer;
-- no GPU UI backend;
-- no full application window;
-- no artwork fetching for the menu;
-- no Home feed or lyrics surface;
-- no UI polling/repaint loop.
-
-A controlled same-runner CI comparison reduced idle app RSS from about **174 MB to 33 MB** versus the previous visible-window Mac port. That is a signed-out synthetic comparison, not a promise for a live playback session. See [current state and evidence](docs/CURRENT.md).
-
-## Architecture
-
-```mermaid
-flowchart LR
-    A["AppKit menu bar"] --> R["Rust YTfast core"]
-    K["macOS media controls"] --> R
-    R --> Y["YouTube Music / InnerTube"]
-    R --> D["yt-dlp + Deno<br/>stream resolution"]
-    R --> M["mpv<br/>audio + IPC"]
-    B["Chrome / Brave / Chromium"] --> C["local cookie decrypt"]
-    C --> R
-```
-
-The menu, macOS media controls and CLI all drive the **same player state**. There is no second menu-bar player.
-
-The circular play control macOS may show is the system's global **Now Playing** item, not another YTfast process.
+Exact limits and current verification are in [macOS architecture](docs/MACOS.md) and [current state](docs/CURRENT.md).
 
 ## Build
 
-On macOS 13+ with Rust 1.98+ and Xcode Command Line Tools:
+On macOS with Rust 1.98+ and Xcode Command Line Tools:
 
 ```sh
 scripts/build-macos.sh
 open dist/YTfast.app
 ```
 
-The build produces `dist/YTfast.app` and an architecture-labelled ZIP.
+Outputs are `dist/YTfast.app` and `dist/ytfast-macos-<arch>.zip`. The optional `desktop-ui` Cargo feature is a separate Linux/development target and is excluded from the Mac package.
 
-The retained upstream desktop UI remains available for Linux/development through the default `desktop-ui` feature. It is **not** part of the Mac menu-bar package.
+## Development
 
-## Documentation
+- [Current macOS product and architecture](docs/MACOS.md)
+- [Verified state and evidence](docs/CURRENT.md)
+- [Contributor guidance](AGENTS.md)
+- [Inherited desktop specification](docs/SPEC.md) and [dated integration research](docs/integration.md)
 
-- [macOS product + architecture contract](docs/MACOS.md)
-- [current tested state, measurements and limits](docs/CURRENT.md)
-- [agent/development rules](AGENTS.md)
-- [inherited desktop product spec](docs/SPEC.md) — legacy desktop reference
-- [inherited integration research](docs/integration.md) — dated technical evidence
-
-Current docs override historical desktop assumptions for the Mac build.
+Current source, observed behavior and user direction take precedence over inherited implementation assumptions.
 
 ## Credits
 
 Fork of [MayberryDT/ytfast](https://github.com/MayberryDT/ytfast), by Tyler Mayberry.
 
-The existing Rust YouTube Music client, account logic, queue and playback engine remain the core. [Sonora](https://github.com/sonorahq/sonora) informed the **architecture only**: separate player/provider logic from UI, keep one player owner, preload only useful upcoming media and use explicit resource bounds. No Sonora source or GPUI dependency is included.
+[Sonora](https://github.com/sonorahq/sonora) informed architectural decisions about playback preparation, snapshots, account isolation and native interaction. No GPL source was copied into this MIT project.
 
-MIT. Unofficial and not affiliated with YouTube or Google.
+Unofficial and not affiliated with YouTube or Google.
