@@ -6,6 +6,13 @@ The macOS release is intentionally not a desktop music app: one AppKit status it
 
 **Previous · Play/Pause · Next · Shuffle · Volume · Library · Add to playlist**
 
+### Current macOS UI
+
+![YTfast native macOS menu-bar UI](docs/screenshots/menu-bar-current.png)
+
+*Actual AppKit menu captured from the current macOS build with fixture track data; no image from the upstream desktop fork.*
+
+
 ## Install
 
 Requirements:
