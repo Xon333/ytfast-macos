@@ -11,8 +11,10 @@ assert os.environ['GITHUB_REF'] == 'refs/heads/perf/menubar'
 patch = lzma.decompress(b''.join(Path(f'.port/part-{i}').read_bytes() for i in range(4)))
 assert hashlib.sha256(patch).hexdigest() == '03cb72a6edc87b6f8a355b9fd4a5ffa77abcc2eab5ccc06d0ee2ebbec97d8e52'
 subprocess.run(['git', 'apply', '--index', '-'], input=patch, check=True)
+# Actions cannot modify workflow files. The user-authorized GitHub connector
+# applies the permanent read-only workflow and removes the bootstrap separately.
+subprocess.run(['git', 'restore', '--source=HEAD', '--staged', '--worktree', '.github/workflows'], check=True)
 shutil.rmtree('.port')
-Path('.github/workflows/menubar.yml').unlink()
 subprocess.run(['cargo', 'fmt', '--all'], check=True)
 subprocess.run(['git', 'add', '-A'], check=True)
 subprocess.run(['git', 'config', 'user.name', 'github-actions[bot]'], check=True)
