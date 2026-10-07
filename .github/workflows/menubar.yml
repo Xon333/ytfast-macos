@@ -1,0 +1,27 @@
+name: Menu bar checks
+on:
+  push:
+    branches: [perf/menubar]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  sources:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: |
+          mkdir -p artifacts/source
+          git archive --format=tar.gz HEAD > artifacts/source/ytfast-source.tar.gz
+          git clone --depth 1 https://github.com/sonorahq/sonora.git "$RUNNER_TEMP/sonora"
+          git -C "$RUNNER_TEMP/sonora" fetch --depth 1 origin 9f6567874582749b675a59ee705a8447191da6b6
+          git -C "$RUNNER_TEMP/sonora" archive --format=tar.gz 9f6567874582749b675a59ee705a8447191da6b6 crates Cargo.toml COPYING CLAUDE.md README.md > artifacts/source/sonora-reference.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-review
+          path: artifacts/source/
+          retention-days: 1
+          if-no-files-found: error
