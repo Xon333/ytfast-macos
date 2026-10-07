@@ -45,7 +45,7 @@ A signed-out idle app must not launch mpv, yt-dlp or Deno.
 
 ## Resource evidence
 
-Controlled comparison from GitHub Actions run `37575953091`, on the same macOS ARM64 runner with isolated empty homes:
+Controlled comparison from GitHub Actions run `37575953091`, on the same macOS ARM64 runner with isolated empty homes. The exact retained values are in [macos-menubar-20261007.json](evidence/macos-menubar-20261007.json):
 
 | Build | Idle RSS |
 | --- | ---: |
