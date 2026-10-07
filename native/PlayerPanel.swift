@@ -1,515 +1,641 @@
 import AppKit
 
-final class MusicTable: NSTableView {
-    var activate: (() -> Void)?
-    var togglePlayback: (() -> Void)?
-    override func keyDown(with event: NSEvent) {
-        if event.keyCode == 36 || event.keyCode == 76 { activate?() }
-        else if event.keyCode == 49 { togglePlayback?() }
-        else { super.keyDown(with: event) }
-    }
-}
-
-/// AppKit reuses only the visible cells. A thousand-song playlist is still one
-/// scrollable list, not a chain of menus or a thousand retained row views.
-final class MusicCell: NSTableCellView {
-    let title = NSTextField(labelWithString: "")
-    let subtitle = NSTextField(labelWithString: "")
-    let accessory = NSImageView()
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        title.font = .systemFont(ofSize: 12, weight: .medium)
-        subtitle.font = .systemFont(ofSize: 11)
-        subtitle.textColor = .secondaryLabelColor
-        for label in [title, subtitle] {
-            label.lineBreakMode = .byTruncatingTail
-            label.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(label)
-        }
-        accessory.translatesAutoresizingMaskIntoConstraints = false
-        accessory.contentTintColor = .secondaryLabelColor
-        addSubview(accessory)
-        NSLayoutConstraint.activate([
-            title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            title.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            title.trailingAnchor.constraint(equalTo: accessory.leadingAnchor, constant: -8),
-            subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 2),
-            subtitle.trailingAnchor.constraint(equalTo: title.trailingAnchor),
-            accessory.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            accessory.centerYAnchor.constraint(equalTo: centerYAnchor),
-            accessory.widthAnchor.constraint(equalToConstant: 14),
-            accessory.heightAnchor.constraint(equalToConstant: 14)
-        ])
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
-}
-
 final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
+    static let width: CGFloat = 360
+    static let searchDelay: TimeInterval = 0.18
     let send: ([String: Any]) -> Void
+    var sizeChanged: ((NSSize) -> Void)?
+    var closeRequested: (() -> Void)?
     private(set) var state = State()
     private(set) var pages: [String: Page] = [:]
     private(set) var location = Location.library(0)
     private(set) var rows: [Row] = []
+    private(set) var reloadCount = 0
+    private(set) var showingAccount = false
     private var history: [Location] = []
-    private var searchWork: DispatchWorkItem?
+    private var libraryIndex = 0
     private var visible = false
-    private var renderedLocation = ""
     private var browserDirty = true
-    private var accountMenu: NSMenu?
-    private var reconnectItem: NSMenuItem?
-    private var accountInfo: NSMenuItem?
+    private var renderedLocation = ""
+    private var searchWork: DispatchWorkItem?
+    private var searchPending = false
+    private var noticeWork: DispatchWorkItem?
+    private var detailsVisible = false
+    private var pendingSong: Song?
+    private var seekSongID: String?
+    private var lastAudibleVolume = 70.0
+    private var lastSentVolume: Double?
 
-    let titleLabel = NSTextField(labelWithString: "Nothing playing")
-    let artistLabel = NSTextField(labelWithString: "Choose a song below")
-    let playButton = NSButton()
-    let previousButton = NSButton()
-    let nextButton = NSButton()
-    let shuffleButton = NSButton()
-    let addButton = NSButton()
-    let seek = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
-    let volume = NSSlider(value: 70, minValue: 0, maxValue: 100, target: nil, action: nil)
+    let titleLabel = NSTextField(labelWithString: "YTfast")
+    let artistLabel = NSTextField(labelWithString: "Choose a song")
+    let playButton = SymbolButton("play.fill", "Play", size: 42, pointSize: 18, primary: true)
+    let previousButton = SymbolButton("backward.end.fill", "Previous", size: 32, pointSize: 15)
+    let nextButton = SymbolButton("forward.end.fill", "Next", size: 32, pointSize: 15)
+    let shuffleButton = SymbolButton("shuffle", "Shuffle")
+    let addButton = SymbolButton("plus", "Add to playlist")
+    let muteButton = SymbolButton("speaker.wave.2", "Mute", size: 24, pointSize: 12)
+    let seek = ValueSlider(value: 0, maximum: 1)
+    let volume = ValueSlider(value: 70, maximum: 100)
     private let elapsed = NSTextField(labelWithString: "0:00")
     private let remaining = NSTextField(labelWithString: "−0:00")
     private let playbackStatus = NSTextField(labelWithString: "")
     private let playbackSpinner = NSProgressIndicator()
     let search = NSSearchField()
-    let sections = NSSegmentedControl(labels: ["Playlists", "Liked Music", "Albums"], trackingMode: .selectOne, target: nil, action: nil)
-    let backButton = NSButton()
-    private let pageTitle = NSTextField(labelWithString: "Playlists")
+    let sections = NSSegmentedControl(labels: ["Playlists", "Liked", "Albums"], trackingMode: .selectOne, target: nil, action: nil)
+    let backButton = SymbolButton("chevron.left", "Back", size: 28)
+    private let pageTitle = NSTextField(labelWithString: "")
     let pagePlay = NSButton(title: "Play", target: nil, action: nil)
-    let refreshButton = NSButton()
+    let refreshButton = SymbolButton("arrow.clockwise", "Refresh", size: 28)
     private let pageSpinner = NSProgressIndicator()
     let table = MusicTable()
     let scroll = NSScrollView()
     private let emptyLabel = NSTextField(wrappingLabelWithString: "")
-    private let emptyActions = NSStackView()
-    let reconnectButton = NSButton(title: "Reconnect", target: nil, action: nil)
-    private let empty = NSStackView()
     let moreButton = NSButton(title: "Load more", target: nil, action: nil)
-    private let messageRow = NSStackView()
     private let messageLabel = NSTextField(wrappingLabelWithString: "")
-    private let dismissButton = NSButton()
-    let accountButton = NSButton()
-    private let quitButton = NSButton()
+    private let dismissButton = SymbolButton("xmark", "Dismiss", size: 22, pointSize: 10)
+    private let retryButton = NSButton(title: "Retry", target: nil, action: nil)
+    let accountButton = NSButton(title: "Account", target: nil, action: nil)
+    private let overflowButton = SymbolButton("ellipsis", "More", size: 26)
+    private let appLabel = NSTextField(labelWithString: "YTfast")
+
+    let profilePicker = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let profileLabel = NSTextField(labelWithString: "")
+    let reconnectButton = ConnectButton()
+    let browserButton = NSButton(title: "Sign in", target: nil, action: nil)
+    private let accountTitle = NSTextField(labelWithString: "Connect YouTube Music")
+    private let accountStatus = NSTextField(wrappingLabelWithString: "")
+    private let accountSpinner = NSProgressIndicator()
+    private let accessButton = NSButton(title: "Allow Full Disk Access…", target: nil, action: nil)
+    private let detailsButton = NSButton(title: "Details", target: nil, action: nil)
+    private let accountDetails = NSTextField(wrappingLabelWithString: "")
+
+    private let content = NSStackView()
+    private let player = NSStackView()
+    private let playerSeparator = NSBox()
+    private let transport = NSStackView()
+    private let timeRow = NSStackView()
+    private let tabs = NSStackView()
+    private let context = NSStackView()
+    private let browser = NSView()
+    private let accountPane = NSStackView()
+    private let messageRow = NSStackView()
+    private let footerSeparator = NSBox()
+    private let footer = NSStackView()
+    private var browserHeight: NSLayoutConstraint!
+    private var playerHeight: NSLayoutConstraint!
+    private var permissionRequired: Bool {
+        let reason = state.account.lowercased()
+        return !state.signed_in && !state.account_checking &&
+            ["permission", "not permitted", "access denied", "full disk", "readonly database"].contains { reason.contains($0) }
+    }
 
     init(send: @escaping ([String: Any]) -> Void) {
         self.send = send
         super.init(nibName: nil, bundle: nil)
+        preferredContentSize = NSSize(width: Self.width, height: 400)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+    deinit { searchWork?.cancel(); noticeWork?.cancel() }
 
-    private func symbol(_ button: NSButton, _ name: String, _ label: String, _ action: Selector, size: CGFloat = 28) {
-        button.title = ""
-        button.image = NSImage(systemSymbolName: name, accessibilityDescription: label)
-        button.imagePosition = .imageOnly
-        button.isBordered = false
-        button.bezelStyle = .regularSquare
-        button.target = self; button.action = action
-        button.toolTip = label; button.setAccessibilityLabel(label)
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.widthAnchor.constraint(equalToConstant: size).isActive = true
-        button.heightAnchor.constraint(equalToConstant: size).isActive = true
+    private func fixed(_ child: NSView, _ height: CGFloat) {
+        child.translatesAutoresizingMaskIntoConstraints = false
+        child.heightAnchor.constraint(equalToConstant: height).isActive = true
     }
-    private func horizontal(_ views: [NSView], spacing: CGFloat = 8) -> NSStackView {
-        let result = NSStackView(views: views)
-        result.orientation = .horizontal; result.alignment = .centerY; result.spacing = spacing
-        return result
+    private func horizontal(_ stack: NSStackView, _ children: [NSView], spacing: CGFloat = 8) {
+        stack.orientation = .horizontal; stack.alignment = .centerY; stack.spacing = spacing
+        for child in children { stack.addArrangedSubview(child) }
     }
-    private func spacer() -> NSView {
+    private func gap() -> NSView {
         let view = NSView()
         view.setContentHuggingPriority(.defaultLow, for: .horizontal)
         return view
     }
-    private func spinner(_ view: NSProgressIndicator) {
-        view.style = .spinning; view.controlSize = .small; view.isDisplayedWhenStopped = false
-        view.widthAnchor.constraint(equalToConstant: 14).isActive = true
-        view.heightAnchor.constraint(equalToConstant: 14).isActive = true
+    private func spinner(_ indicator: NSProgressIndicator) {
+        indicator.style = .spinning; indicator.controlSize = .small
+        indicator.isDisplayedWhenStopped = false
+        indicator.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([indicator.widthAnchor.constraint(equalToConstant: 12), indicator.heightAnchor.constraint(equalToConstant: 12)])
     }
-    private func separator() -> NSBox {
-        let line = NSBox(); line.boxType = .separator; return line
+    private func button(_ button: NSButton, _ action: Selector) {
+        button.target = self; button.action = action
+        if !(button is SymbolButton) && !(button is ConnectButton) { button.bezelStyle = .rounded; button.controlSize = .regular; button.font = .systemFont(ofSize: 12) }
+    }
+    private func add(_ child: NSView) {
+        child.translatesAutoresizingMaskIntoConstraints = false
+        content.addArrangedSubview(child)
+        child.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
     }
 
     override func loadView() {
-        let surface = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 380, height: 560))
+        let surface = NSVisualEffectView(frame: NSRect(origin: .zero, size: preferredContentSize))
         surface.material = .popover; surface.blendingMode = .withinWindow; surface.state = .active
         view = surface
-        let content = NSStackView()
         content.orientation = .vertical; content.alignment = .leading; content.spacing = 8
-        content.translatesAutoresizingMaskIntoConstraints = false
+        content.detachesHiddenViews = true; content.translatesAutoresizingMaskIntoConstraints = false
         surface.addSubview(content)
         NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: surface.leadingAnchor, constant: 14),
-            content.trailingAnchor.constraint(equalTo: surface.trailingAnchor, constant: -14),
-            content.topAnchor.constraint(equalTo: surface.topAnchor, constant: 14),
+            content.leadingAnchor.constraint(equalTo: surface.leadingAnchor, constant: 12),
+            content.trailingAnchor.constraint(equalTo: surface.trailingAnchor, constant: -12),
+            content.topAnchor.constraint(equalTo: surface.topAnchor, constant: 12),
             content.bottomAnchor.constraint(equalTo: surface.bottomAnchor, constant: -12)
         ])
-        func add(_ child: NSView) {
-            child.translatesAutoresizingMaskIntoConstraints = false
-            content.addArrangedSubview(child)
-            child.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
-        }
+        player.orientation = .vertical; player.alignment = .leading; player.spacing = 4
         titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
-        titleLabel.lineBreakMode = .byTruncatingTail
         artistLabel.font = .systemFont(ofSize: 12); artistLabel.textColor = .secondaryLabelColor
-        artistLabel.lineBreakMode = .byTruncatingTail
         let heading = NSStackView(views: [titleLabel, artistLabel])
         heading.orientation = .vertical; heading.alignment = .leading; heading.spacing = 3
-        titleLabel.widthAnchor.constraint(equalTo: heading.widthAnchor).isActive = true
-        artistLabel.widthAnchor.constraint(equalTo: heading.widthAnchor).isActive = true
-        add(heading)
-        symbol(shuffleButton, "shuffle", "Shuffle", #selector(shuffle(_:)))
-        symbol(previousButton, "backward.end.fill", "Previous", #selector(previous(_:)), size: 32)
-        symbol(playButton, "play.fill", "Play", #selector(toggle(_:)), size: 38)
-        playButton.imageScaling = .scaleProportionallyUpOrDown
-        symbol(nextButton, "forward.end.fill", "Next", #selector(next(_:)), size: 32)
-        symbol(addButton, "text.badge.plus", "Add song to playlist", #selector(addSong(_:)))
-        let leftSpace = spacer(), rightSpace = spacer()
-        add(horizontal([shuffleButton, leftSpace, previousButton, playButton, nextButton, rightSpace, addButton]))
-        leftSpace.widthAnchor.constraint(equalTo: rightSpace.widthAnchor).isActive = true
-        seek.target = self; seek.action = #selector(seekChanged(_:)); seek.isContinuous = false
-        seek.controlSize = .small; seek.setAccessibilityLabel("Playback position")
-        volume.target = self; volume.action = #selector(volumeChanged(_:)); volume.isContinuous = true
-        volume.controlSize = .small; volume.setAccessibilityLabel("Volume")
-        for label in [elapsed, remaining] {
+        for label in [titleLabel, artistLabel] {
+            label.lineBreakMode = .byTruncatingTail
+            label.widthAnchor.constraint(equalTo: heading.widthAnchor).isActive = true
+        }
+        fixed(heading, 36)
+        let left = gap(), right = gap()
+        horizontal(transport, [shuffleButton, left, previousButton, playButton, nextButton, right, addButton], spacing: 8)
+        left.widthAnchor.constraint(equalTo: right.widthAnchor).isActive = true
+        fixed(transport, 42)
+        button(playButton, #selector(toggle(_:))); button(previousButton, #selector(previous(_:)))
+        button(nextButton, #selector(next(_:))); button(shuffleButton, #selector(shuffle(_:)))
+        button(addButton, #selector(addSong(_:))); button(muteButton, #selector(mute(_:)))
+        shuffleButton.setAccessibilityRole(.checkBox)
+        seek.target = self; seek.action = #selector(seekChanged(_:)); seek.setAccessibilityLabel("Playback position")
+        seek.beganEditing = { [weak self] in self?.seekSongID = self?.state.track?.id }
+        seek.endedEditing = { [weak self] in self?.commitSeek() }
+        volume.target = self; volume.action = #selector(volumeChanged(_:)); volume.setAccessibilityLabel("Volume")
+        volume.beganEditing = { [weak self] in self?.lastSentVolume = nil }
+        volume.endedEditing = { [weak self] in guard let self else { return }; self.volumeChanged(self.volume) }
+        volume.widthAnchor.constraint(equalToConstant: 92).isActive = true
+        for label in [elapsed, remaining, playbackStatus] {
             label.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
             label.textColor = .secondaryLabelColor
-            label.widthAnchor.constraint(equalToConstant: 38).isActive = true
         }
-        remaining.alignment = .right
-        add(horizontal([elapsed, seek, remaining], spacing: 4))
-        let speaker = NSImageView(image: NSImage(systemSymbolName: "speaker.wave.2", accessibilityDescription: "Volume")!)
-        speaker.contentTintColor = .secondaryLabelColor
-        volume.widthAnchor.constraint(equalToConstant: 110).isActive = true
-        playbackStatus.font = .systemFont(ofSize: 10); playbackStatus.textColor = .secondaryLabelColor
-        playbackStatus.lineBreakMode = .byTruncatingTail; playbackStatus.alignment = .right
-        playbackStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        playbackStatus.font = .systemFont(ofSize: 10)
+        playbackStatus.lineBreakMode = .byTruncatingTail
         spinner(playbackSpinner)
-        add(horizontal([speaker, volume, spacer(), playbackSpinner, playbackStatus], spacing: 6))
-        add(separator())
-        search.placeholderString = "Search YouTube Music"
+        let timeLeft = gap(), timeRight = gap()
+        horizontal(timeRow, [elapsed, timeLeft, playbackSpinner, playbackStatus, timeRight, remaining], spacing: 3)
+        timeLeft.widthAnchor.constraint(equalTo: timeRight.widthAnchor).isActive = true
+        fixed(timeRow, 12)
+        for child in [heading, transport, seek, timeRow] {
+            player.addArrangedSubview(child)
+            child.widthAnchor.constraint(equalTo: player.widthAnchor).isActive = true
+        }
+        add(player); playerHeight = player.heightAnchor.constraint(equalToConstant: 120); playerHeight.isActive = true
+        for line in [playerSeparator, footerSeparator] { line.boxType = .separator; fixed(line, 1) }
+        add(playerSeparator)
+        search.placeholderString = "Search music"
+        search.font = .systemFont(ofSize: 12); search.focusRingType = .none
         search.delegate = self; search.target = self; search.action = #selector(searchNow(_:))
-        search.sendsWholeSearchString = true
-        search.setAccessibilityLabel("Search YouTube Music")
-        add(search)
-        sections.selectedSegment = 0; sections.segmentDistribution = .fillEqually
-        sections.target = self; sections.action = #selector(changeSection(_:)); sections.controlSize = .small
-        add(sections)
-        symbol(backButton, "chevron.left", "Back", #selector(back(_:)), size: 22)
-        symbol(refreshButton, "arrow.clockwise", "Refresh", #selector(refreshPage(_:)), size: 22)
-        pageTitle.font = .systemFont(ofSize: 12, weight: .semibold); pageTitle.lineBreakMode = .byTruncatingTail
+        search.sendsWholeSearchString = true; search.setAccessibilityLabel("Search YouTube Music")
+        fixed(search, 28); add(search)
+        sections.selectedSegment = 0; sections.segmentDistribution = .fillEqually; sections.controlSize = .regular
+        sections.font = .systemFont(ofSize: 12, weight: .medium)
+        sections.target = self; sections.action = #selector(changeSection(_:))
+        sections.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        button(refreshButton, #selector(refreshPage(_:))); spinner(pageSpinner)
+        horizontal(tabs, [sections, pageSpinner, refreshButton], spacing: 6)
+        sections.widthAnchor.constraint(equalTo: tabs.widthAnchor, constant: -52).isActive = true
+        fixed(tabs, 30); add(tabs)
+        button(backButton, #selector(back(_:))); button(pagePlay, #selector(playPage(_:)))
+        pageTitle.font = .systemFont(ofSize: 12, weight: .semibold)
+        pageTitle.lineBreakMode = .byTruncatingTail
         pageTitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        pagePlay.target = self; pagePlay.action = #selector(playPage(_:)); pagePlay.controlSize = .small; pagePlay.bezelStyle = .rounded
-        spinner(pageSpinner)
-        add(horizontal([backButton, pageTitle, spacer(), pageSpinner, pagePlay, refreshButton], spacing: 6))
+        horizontal(context, [backButton, pageTitle, gap(), pagePlay], spacing: 4)
+        fixed(context, 30); add(context)
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("music"))
         table.addTableColumn(column); table.headerView = nil; table.rowHeight = 44
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-        table.intercellSpacing = NSSize(width: 0, height: 1)
-        table.backgroundColor = .clear; table.style = .plain
-        table.dataSource = self; table.delegate = self; table.target = self; table.action = #selector(activateRow(_:))
+        table.intercellSpacing = .zero; table.backgroundColor = .clear; table.style = .plain
+        table.dataSource = self; table.delegate = self
         table.activate = { [weak self] in self?.activateSelectedRow() }
         table.togglePlayback = { [weak self] in self?.toggle(nil) }
+        table.goBack = { [weak self] in self?.escape() }
         table.setAccessibilityLabel("Music")
         scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
         scroll.drawsBackground = false; scroll.borderType = .noBorder
-        let list = NSView(); list.addSubview(scroll); list.addSubview(empty)
-        for child in [scroll, empty] { child.translatesAutoresizingMaskIntoConstraints = false }
-        NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: list.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: list.trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: list.topAnchor), scroll.bottomAnchor.constraint(equalTo: list.bottomAnchor),
-            empty.leadingAnchor.constraint(equalTo: list.leadingAnchor, constant: 14), empty.trailingAnchor.constraint(equalTo: list.trailingAnchor, constant: -14),
-            empty.centerYAnchor.constraint(equalTo: list.centerYAnchor), list.heightAnchor.constraint(greaterThanOrEqualToConstant: 110)
-        ])
-        empty.orientation = .vertical; empty.alignment = .centerX; empty.spacing = 12
         emptyLabel.font = .systemFont(ofSize: 12); emptyLabel.textColor = .secondaryLabelColor
-        emptyLabel.alignment = .center; emptyLabel.preferredMaxLayoutWidth = 320
-        empty.addArrangedSubview(emptyLabel)
-        emptyLabel.widthAnchor.constraint(equalTo: empty.widthAnchor).isActive = true
-        let signIn = NSButton(title: "Open YouTube Music", target: self, action: #selector(openSignIn(_:)))
-        signIn.bezelStyle = .rounded; signIn.controlSize = .small
-        reconnectButton.bezelStyle = .rounded; reconnectButton.controlSize = .small
-        reconnectButton.target = self; reconnectButton.action = #selector(reconnect(_:))
-        emptyActions.orientation = .horizontal; emptyActions.spacing = 8
-        emptyActions.addArrangedSubview(signIn); emptyActions.addArrangedSubview(reconnectButton)
-        empty.addArrangedSubview(emptyActions)
-        add(list)
-        moreButton.target = self; moreButton.action = #selector(loadMore(_:)); moreButton.bezelStyle = .rounded; moreButton.controlSize = .small
-        add(moreButton)
+        emptyLabel.alignment = .center; emptyLabel.maximumNumberOfLines = 2
+        for child in [scroll, emptyLabel, accountPane] { child.translatesAutoresizingMaskIntoConstraints = false; browser.addSubview(child) }
+        NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: browser.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: browser.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: browser.topAnchor), scroll.bottomAnchor.constraint(equalTo: browser.bottomAnchor),
+            emptyLabel.leadingAnchor.constraint(equalTo: browser.leadingAnchor, constant: 20), emptyLabel.trailingAnchor.constraint(equalTo: browser.trailingAnchor, constant: -20),
+            emptyLabel.centerYAnchor.constraint(equalTo: browser.centerYAnchor),
+            accountPane.leadingAnchor.constraint(equalTo: browser.leadingAnchor, constant: 12), accountPane.trailingAnchor.constraint(equalTo: browser.trailingAnchor, constant: -12),
+            accountPane.centerYAnchor.constraint(equalTo: browser.centerYAnchor)
+        ])
+        makeAccountPane()
+        add(browser); browserHeight = browser.heightAnchor.constraint(equalToConstant: 176); browserHeight.isActive = true
+        button(moreButton, #selector(loadMore(_:))); fixed(moreButton, 26); add(moreButton)
         messageLabel.font = .systemFont(ofSize: 11); messageLabel.maximumNumberOfLines = 2
-        messageLabel.isSelectable = true; messageLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        symbol(dismissButton, "xmark", "Dismiss message", #selector(dismissMessage(_:)), size: 20)
-        messageRow.orientation = .horizontal; messageRow.alignment = .centerY; messageRow.spacing = 6
-        messageRow.addArrangedSubview(messageLabel); messageRow.addArrangedSubview(dismissButton)
-        add(messageRow)
-        add(separator())
-        accountButton.title = "Account"; accountButton.isBordered = false; accountButton.font = .systemFont(ofSize: 11)
-        accountButton.alignment = .left; accountButton.imagePosition = .imageLeft
+        messageLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        button(dismissButton, #selector(dismissMessage(_:))); button(retryButton, #selector(refreshPage(_:)))
+        horizontal(messageRow, [messageLabel, retryButton, dismissButton], spacing: 5)
+        fixed(messageRow, 34); add(messageRow)
+        add(footerSeparator)
+        button(accountButton, #selector(showAccount(_:))); accountButton.isBordered = false
         accountButton.image = NSImage(systemSymbolName: "person.crop.circle", accessibilityDescription: nil)
-        accountButton.cell?.lineBreakMode = .byTruncatingTail
-        accountButton.target = self; accountButton.action = #selector(showAccount(_:))
-        accountButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        symbol(quitButton, "power", "Quit YTfast", #selector(quit(_:)), size: 22)
-        quitButton.keyEquivalent = "q"; quitButton.keyEquivalentModifierMask = .command
-        add(horizontal([accountButton, spacer(), quitButton]))
+        accountButton.imagePosition = .imageLeft; accountButton.setAccessibilityLabel("Account")
+        button(overflowButton, #selector(showMore(_:)))
+        appLabel.font = .systemFont(ofSize: 11, weight: .medium); appLabel.textColor = .secondaryLabelColor
+        horizontal(footer, [appLabel, muteButton, volume, gap(), accountButton, overflowButton], spacing: 5)
+        fixed(footer, 30); add(footer)
+        browserDirty = true
+        render()
+    }
+
+    private func makeAccountPane() {
+        accountPane.orientation = .vertical; accountPane.alignment = .centerX; accountPane.spacing = 10
+        accountTitle.font = .systemFont(ofSize: 15, weight: .semibold)
+        accountStatus.font = .systemFont(ofSize: 11); accountStatus.textColor = .secondaryLabelColor
+        accountStatus.alignment = .center; accountStatus.maximumNumberOfLines = 2
+        accountStatus.preferredMaxLayoutWidth = 300
+        let heading = NSStackView(); spinner(accountSpinner)
+        horizontal(heading, [accountSpinner, accountTitle], spacing: 6)
+        accountPane.addArrangedSubview(heading)
+        accountPane.addArrangedSubview(accountStatus)
+        accountStatus.widthAnchor.constraint(equalTo: accountPane.widthAnchor).isActive = true
+        profilePicker.font = .systemFont(ofSize: 12); profilePicker.controlSize = .regular
+        profilePicker.target = self; profilePicker.action = #selector(selectProfile(_:))
+        profilePicker.setAccessibilityLabel("Browser profile")
+        accountPane.addArrangedSubview(profilePicker)
+        profilePicker.widthAnchor.constraint(equalTo: accountPane.widthAnchor).isActive = true
+        profileLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        profileLabel.alignment = .center; profileLabel.lineBreakMode = .byTruncatingMiddle
+        accountPane.addArrangedSubview(profileLabel)
+        profileLabel.widthAnchor.constraint(equalTo: accountPane.widthAnchor).isActive = true
+        button(reconnectButton, #selector(reconnect(_:))); button(browserButton, #selector(openSignIn(_:)))
+        reconnectButton.bezelColor = .controlAccentColor
+        let actions = NSStackView(); horizontal(actions, [browserButton, reconnectButton], spacing: 10)
+        accountPane.addArrangedSubview(actions)
+        button(accessButton, #selector(openDiskAccess(_:))); accessButton.isBordered = false
+        button(detailsButton, #selector(toggleDetails(_:))); detailsButton.isBordered = false
+        let help = NSStackView(), helpLeft = gap(), helpRight = gap()
+        horizontal(help, [helpLeft, accessButton, detailsButton, helpRight], spacing: 8)
+        help.detachesHiddenViews = true
+        helpLeft.widthAnchor.constraint(equalTo: helpRight.widthAnchor).isActive = true
+        accountPane.addArrangedSubview(help)
+        help.widthAnchor.constraint(equalTo: accountPane.widthAnchor).isActive = true
+        accountDetails.font = .systemFont(ofSize: 10); accountDetails.textColor = .secondaryLabelColor
+        accountDetails.maximumNumberOfLines = 4; accountDetails.isSelectable = true
+        accountPane.addArrangedSubview(accountDetails)
+        accountDetails.widthAnchor.constraint(equalTo: accountPane.widthAnchor).isActive = true
+        fixed(accountDetails, 54)
     }
 
     func opened() {
-        _ = view
-        visible = true
-        // Closing a popover cancels the debounce, not the user's query.
-        if !search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { searchNow(nil) }
-        render(force: true)
-        loadCurrent()
+        _ = view; visible = true
+        browserDirty = true
+        render()
+        if searchPending { submitSearch() } else { loadCurrent() }
     }
     func closed() {
         visible = false
+        location.scroll = scroll.contentView.bounds.origin
         searchWork?.cancel(); searchWork = nil
-        playbackSpinner.stopAnimation(nil); pageSpinner.stopAnimation(nil)
+        for indicator in [playbackSpinner, pageSpinner, accountSpinner] { indicator.stopAnimation(nil) }
     }
     func apply(_ next: State) {
         let connected = !state.signed_in && next.signed_in
         let boundary = state.profile != next.profile || (state.signed_in && !next.signed_in)
-        if boundary || !next.signed_in {
-            pages.removeAll()
-            if boundary {
-                searchWork?.cancel(); searchWork = nil
-                history.removeAll(); location = .library(max(0, sections.selectedSegment))
-                search.stringValue = ""; renderedLocation = ""
+        let chromeChanged = state.account != next.account || state.account_checking != next.account_checking ||
+            state.signed_in != next.signed_in || state.profiles != next.profiles ||
+            state.error != next.error || state.notice != next.notice || state.adding != next.adding
+        let trackChanged = state.track?.id != next.track?.id
+        let transportChanged = trackChanged || state.playing != next.playing || state.loading != next.loading
+        let hasAudioChanged = (state.track != nil || state.loading) != (next.track != nil || next.loading)
+        if trackChanged || (state.loading && !next.loading) || next.error != nil { pendingSong = nil }
+        if boundary {
+            searchWork?.cancel(); searchWork = nil; searchPending = false
+            pages.removeAll(); history.removeAll(); location = .library(libraryIndex)
+            renderedLocation = ""; pendingSong = nil; detailsVisible = false
+        }
+        if !next.signed_in { pages.removeAll() }
+        if connected { showingAccount = false }
+        if next.volume > 0 { lastAudibleVolume = next.volume }
+        if next.notice != state.notice {
+            noticeWork?.cancel()
+            if let notice = next.notice, !next.adding, next.error == nil {
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self, self.state.notice == notice, self.state.error == nil else { return }
+                    self.send(["op": "dismiss"])
+                }
+                noticeWork = work; DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
             }
         }
         state = next
+        // Pages have one native owner; transport snapshots need not retain a
+        // second copy of the complete catalogue.
+        state.pages = nil
         if let updates = next.pages {
             pages = next.signed_in ? Dictionary(uniqueKeysWithValues: updates.map { ($0.key, $0) }) : [:]
             browserDirty = true
         }
-        if boundary { browserDirty = true }
-        accountInfo?.title = next.account
-        reconnectItem?.title = next.account_checking ? "Connecting…" : "Reconnect"
-        reconnectItem?.isEnabled = !next.account_checking
+        browserDirty = browserDirty || boundary || chromeChanged || trackChanged || hasAudioChanged
         if visible {
             render()
-            if connected { onMainRunLoop { [weak self] in self?.loadCurrent() } }
+            if transportChanged { updateVisibleRows() }
+        }
+        if connected {
+            // Warm only the small playlist index, including its disk snapshot.
+            // No stream resolver or audio process is started by this request.
+            onMainRunLoop { [weak self] in
+                guard let self, self.state.signed_in else { return }
+                self.send(["op": "browse", "target": browseTarget(playlistID), "force": false])
+            }
         }
     }
-    private func busy(_ spinner: NSProgressIndicator, _ active: Bool) {
-        if active && visible { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+    private func busy(_ indicator: NSProgressIndicator, _ active: Bool) {
+        if active && visible { indicator.startAnimation(nil) } else { indicator.stopAnimation(nil) }
     }
-    private func render(force: Bool = false) {
-        setText(titleLabel, state.track?.title ?? (state.loading ? "Starting playback…" : "Nothing playing"))
-        setText(artistLabel, state.track?.artist ?? "Choose a song below")
-        titleLabel.toolTip = state.track?.title; artistLabel.toolTip = state.track?.artist
-        let active = state.playing || state.loading
-        let playLabel = active ? "Pause" : "Play"
-        if playButton.toolTip != playLabel {
-            playButton.image = NSImage(systemSymbolName: active ? "pause.fill" : "play.fill", accessibilityDescription: playLabel)
-            playButton.toolTip = playLabel; playButton.setAccessibilityLabel(playLabel)
-        }
+    private func render() {
+        let song = state.loading ? (pendingSong ?? state.track) : state.track
+        setText(titleLabel, song?.title ?? (state.loading ? "Starting playback…" : "YTfast"))
+        setText(artistLabel, song?.artist ?? "Choose a song")
+        titleLabel.toolTip = song?.title; artistLabel.toolTip = song?.artist
+        playButton.setSymbol(state.loading ? "stop.fill" : (state.playing ? "pause.fill" : "play.fill"), state.loading ? "Cancel loading" : (state.playing ? "Pause" : "Play"))
         playButton.isEnabled = state.track != nil || state.loading
         previousButton.isEnabled = state.track != nil && !state.account_checking
         nextButton.isEnabled = state.track != nil && !state.account_checking
-        shuffleButton.contentTintColor = state.shuffle ? .controlAccentColor : .labelColor
-        shuffleButton.setAccessibilityValue(state.shuffle ? "On" : "Off")
-        addButton.isEnabled = state.signed_in && state.track != nil && !state.adding
-        addButton.toolTip = state.adding ? "Adding song…" : "Add song to playlist"
-        seek.isEnabled = state.duration > 0 && state.track != nil && !state.loading
-        seek.maxValue = max(1, state.duration)
-        if !(seek.cell?.isHighlighted ?? false) { seek.doubleValue = state.position }
-        if !(volume.cell?.isHighlighted ?? false) { volume.doubleValue = state.volume }
-        volume.toolTip = "Volume \(Int(state.volume))%"
-        setText(elapsed, timeLabel(state.position)); setText(remaining, "−" + timeLabel(max(0, state.duration - state.position)))
-        setText(playbackStatus, state.loading ? "Loading audio…" : (state.format ?? (state.track == nil ? "" : "Paused")))
+        shuffleButton.isOn = state.shuffle; shuffleButton.setAccessibilityValue(state.shuffle ? 1 : 0)
+        shuffleButton.setSymbol("shuffle", state.shuffle ? "Shuffle on" : "Shuffle off")
+        addButton.isEnabled = state.signed_in && state.track != nil && !state.loading && !state.adding
+        addButton.setSymbol("plus", state.adding ? "Adding…" : "Add to playlist")
+        seek.isEnabled = state.track != nil && state.duration > 0 && !state.loading
+        if !seek.editing { seek.maxValue = max(1, state.duration); seek.doubleValue = state.position }
+        if !volume.editing { volume.doubleValue = state.volume }
+        if !seek.editing { renderTimes(state.position) }
+        setText(playbackStatus, state.loading ? "Loading…" : (state.format?.components(separatedBy: " (").first ?? ""))
         playbackStatus.toolTip = state.format
         busy(playbackSpinner, state.loading)
+        muteButton.setSymbol(state.volume == 0 ? "speaker.slash" : "speaker.wave.2", state.volume == 0 ? "Unmute" : "Mute")
+        volume.toolTip = "Volume \(Int(volume.doubleValue.rounded()))%"
+        if browserDirty || renderedLocation != location.identity { renderBrowser() }
+    }
+    private func renderTimes(_ position: Double) {
+        setText(elapsed, timeLabel(position)); setText(remaining, "−" + timeLabel(max(0, state.duration - position)))
+    }
+    private func renderBrowser() {
+        browserDirty = false
+        let account = showingAccount || !state.signed_in
+        let hasAudio = state.track != nil || state.loading
+        player.isHidden = account && !hasAudio; playerSeparator.isHidden = player.isHidden
+        playerHeight.constant = hasAudio ? 122 : 36
+        transport.isHidden = !hasAudio; seek.isHidden = !hasAudio; timeRow.isHidden = !hasAudio
+        search.isHidden = account; tabs.isHidden = account
         search.isEnabled = state.signed_in; sections.isEnabled = state.signed_in
-        accountButton.title = state.account_checking ? "Connecting…" : (state.signed_in ? state.account : "Connect account")
-        accountButton.toolTip = state.account; accountButton.setAccessibilityLabel("Account. " + state.account)
-        reconnectButton.isEnabled = !state.account_checking
-        reconnectButton.title = state.account_checking ? "Connecting…" : "Reconnect"
         let page = pages[location.key]
-        setText(pageTitle, location.song.map { "Add “\($0.title)”" } ?? (page?.title.isEmpty == false ? page!.title : location.title))
-        pageTitle.toolTip = pageTitle.stringValue
+        context.isHidden = account || (history.isEmpty && location.song == nil && page?.play == nil)
         backButton.isHidden = history.isEmpty
-        pagePlay.isHidden = location.song != nil || page?.play == nil
-        pagePlay.isEnabled = state.signed_in
-        refreshButton.isEnabled = state.signed_in && page?.loading != true
-        busy(pageSpinner, state.signed_in && (page == nil || page?.loading == true))
-        if force || browserDirty || renderedLocation != location.identity {
-            let newRows = state.signed_in ? (page?.rows ?? []).filter { location.song == nil || $0.editable != nil } : []
-            if force || renderedLocation != location.identity || newRows != rows {
-            let moved = renderedLocation != location.identity
-            let selection = table.selectedRow >= 0 && table.selectedRow < rows.count ? rows[table.selectedRow].identity : nil
+        scroll.isHidden = account; accountPane.isHidden = !account
+        accountButton.isHidden = !state.signed_in
+        accountButton.title = showingAccount && state.signed_in ? "Library" : "Account"
+        accountButton.toolTip = state.account
+        accountButton.setAccessibilityLabel(showingAccount && state.signed_in ? "Back to library" : "Account")
+        muteButton.isHidden = !hasAudio; volume.isHidden = !hasAudio; appLabel.isHidden = !player.isHidden
+        let newRows = state.signed_in ? (page?.rows ?? []).filter { location.song == nil || $0.editable != nil } : []
+        let moved = renderedLocation != location.identity
+        if moved || newRows != rows {
+            let selected = table.selectedRow >= 0 && table.selectedRow < rows.count ? rows[table.selectedRow].identity : nil
             let origin = moved ? location.scroll : scroll.contentView.bounds.origin
-            rows = newRows; table.reloadData()
-            if !moved, let selection, let index = rows.firstIndex(where: { $0.identity == selection }) {
+            rows = newRows; table.reloadData(); reloadCount += 1
+            if !moved, let selected, let index = rows.firstIndex(where: { $0.identity == selected }) {
                 table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
             } else { table.deselectAll(nil) }
+            table.layoutSubtreeIfNeeded()
             scroll.contentView.scroll(to: origin); scroll.reflectScrolledClipView(scroll.contentView)
             renderedLocation = location.identity
-            }
-            browserDirty = false
         }
-        empty.isHidden = !rows.isEmpty
-        emptyActions.isHidden = state.signed_in
-        if !state.signed_in {
-            setText(emptyLabel, state.account_checking ? "Connecting to YouTube Music…" : "Sign in to YouTube Music in your browser, then reconnect.")
-        } else if page == nil || page?.loading == true {
-            setText(emptyLabel, location.song == nil ? "Loading \(location.title.lowercased())…" : "Loading your playlists…")
-        } else {
-            setText(emptyLabel, page?.message ?? (location.song == nil ? "No music here" : "No editable playlists loaded"))
-        }
-        moreButton.isHidden = page?.more != true
-        moreButton.isEnabled = page?.loading != true
-        moreButton.title = page?.loading == true ? "Loading…" : "Load more"
-        let message = state.error ?? state.notice ?? (rows.isEmpty ? nil : page?.message)
+        let loading = searchPending || page == nil || page?.loading == true
+        busy(pageSpinner, !account && loading)
+        refreshButton.isEnabled = !loading
+        pagePlay.isHidden = location.song != nil || page?.play == nil
+        pagePlay.isEnabled = state.signed_in && !state.account_checking
+        setText(pageTitle, location.song.map { "Add “\($0.title)”" } ?? (page?.title.isEmpty == false ? page!.title : location.title))
+        pageTitle.toolTip = pageTitle.stringValue
+        let searching = !location.query.isEmpty || (location.song == nil && history.contains { !$0.query.isEmpty })
+        sections.selectedSegment = searching ? -1 : libraryIndex
+        if search.stringValue != location.query { search.stringValue = location.query }
+        moreButton.isHidden = account || page?.more != true
+        moreButton.isEnabled = !loading; moreButton.title = loading ? "Loading…" : "Load more"
+        emptyLabel.isHidden = account || !rows.isEmpty
+        setText(emptyLabel, loading ? (location.query.isEmpty ? "Loading…" : "Searching…") : (page?.message != nil ? "Couldn't load music" : (location.song != nil ? "No editable playlists" : (location.query.isEmpty ? "No music here yet" : "No results"))))
+        let message = state.error ?? state.notice ?? (account ? nil : page?.message)
         messageRow.isHidden = message == nil
-        setText(messageLabel, message ?? "")
-        messageLabel.textColor = state.error != nil || page?.message != nil ? .secondaryLabelColor : .labelColor
-        messageLabel.toolTip = message
+        setText(messageLabel, message ?? ""); messageLabel.toolTip = message
+        retryButton.isHidden = account || page?.message == nil
         dismissButton.isHidden = state.error == nil && state.notice == nil
+        if account { renderAccount() } else { busy(accountSpinner, false) }
+        browserHeight.constant = account ? (detailsVisible ? 234 : 180) : (rows.isEmpty ? 112 : CGFloat(min(6, rows.count)) * 44)
+        let heights: [(NSView, CGFloat)] = [(player, playerHeight.constant), (playerSeparator, 1), (search, 28), (tabs, 30), (context, 30), (browser, browserHeight.constant), (moreButton, 26), (messageRow, 34), (footerSeparator, 1), (footer, 30)]
+        let shown = heights.filter { !$0.0.isHidden }
+        let size = NSSize(width: Self.width, height: shown.reduce(24) { $0 + $1.1 } + CGFloat(max(0, shown.count - 1)) * 8)
+        if preferredContentSize != size { preferredContentSize = size; sizeChanged?(size) }
+    }
+    private func renderAccount() {
+        setText(accountTitle, "YouTube Music")
+        let name = state.account.components(separatedBy: " · ").first ?? state.account
+        setText(accountStatus, state.signed_in ? name : (permissionRequired ? "Browser access is blocked." : (state.account_checking ? "Connecting…" : "Sign in in your browser, then connect.")))
+        busy(accountSpinner, state.account_checking)
+        let selected = state.profiles.first { $0.id == state.profile }
+        let missing = state.profile != nil && selected == nil
+        let choices = (missing ? [Profile(id: state.profile!, label: "Selected profile unavailable")] : []) + state.profiles
+        if profilePicker.itemArray.compactMap({ $0.representedObject as? String }) != choices.map(\.id) ||
+           profilePicker.itemTitles != choices.map(\.label) {
+            profilePicker.removeAllItems()
+            for profile in choices {
+                profilePicker.addItem(withTitle: profile.label)
+                profilePicker.lastItem?.representedObject = profile.id
+                profilePicker.lastItem?.isEnabled = !missing || profile.id != state.profile
+            }
+        }
+        if let selected = state.profile, let item = profilePicker.itemArray.first(where: { $0.representedObject as? String == selected }) { profilePicker.select(item) }
+        profilePicker.isHidden = choices.count <= 1
+        profilePicker.isEnabled = !state.account_checking && choices.count > 1
+        profileLabel.isHidden = !profilePicker.isHidden
+        setText(profileLabel, selected?.label ?? (missing ? "Selected profile unavailable" : (state.profiles.first?.label ?? "Chrome, Brave or Chromium")))
+        profilePicker.menu?.autoenablesItems = false
+        reconnectButton.title = state.signed_in || state.profile != nil ? "Reconnect" : "Connect"
+        reconnectButton.isEnabled = !state.account_checking
+        accessButton.isHidden = !permissionRequired
+        detailsButton.isHidden = state.signed_in || state.account_checking
+        detailsButton.title = detailsVisible ? "Hide details" : "Details"
+        accountDetails.isHidden = !detailsVisible
+        setText(accountDetails, state.account); accountDetails.toolTip = state.account
     }
 
+    private func updateVisibleRows() {
+        table.enumerateAvailableRowViews { [weak self] rowView, index in
+            guard let self, self.rows.indices.contains(index), let cell = rowView.view(atColumn: 0) as? MusicCell else { return }
+            self.configure(cell, index)
+        }
+    }
+    private func configure(_ cell: MusicCell, _ index: Int) {
+        let row = rows[index]
+        cell.configure(row, adding: location.song != nil, current: row.video != nil && row.video == state.track?.id, playing: state.playing)
+    }
     private func loadCurrent(force: Bool = false) {
-        guard visible && state.signed_in else { return }
+        guard visible, state.signed_in, !showingAccount else { return }
         send(["op": "browse", "target": location.target, "force": force])
     }
-    func navigate(_ next: Location, remember: Bool = true) {
-        searchWork?.cancel(); searchWork = nil
+    func navigate(_ next: Location, remember: Bool = true, load: Bool = true) {
+        searchWork?.cancel(); searchWork = nil; searchPending = false
         if remember {
-            location.scroll = scroll.contentView.bounds.origin
-            history.append(location)
+            location.scroll = scroll.contentView.bounds.origin; history.append(location)
             if history.count > 16 { history.removeFirst() }
         }
-        location = next; render(force: true); loadCurrent()
+        showingAccount = false; location = next; browserDirty = true
+        if let index = next.libraryIndex { libraryIndex = index }
+        if visible { render() }
+        if load { loadCurrent() }
     }
     @objc func changeSection(_ sender: NSSegmentedControl) {
-        searchWork?.cancel(); search.stringValue = ""; history.removeAll()
-        navigate(.library(sender.selectedSegment), remember: false)
+        guard sender.selectedSegment >= 0 else { return }
+        libraryIndex = sender.selectedSegment; history.removeAll()
+        navigate(.library(libraryIndex), remember: false)
     }
     @objc func back(_ sender: Any?) {
+        if showingAccount { showingAccount = false; browserDirty = true; render(); loadCurrent(); return }
         guard let previous = history.popLast() else { return }
-        if !previous.key.hasPrefix("search:") { search.stringValue = "" }
         navigate(previous, remember: false)
+    }
+    func escape() {
+        if showingAccount || !history.isEmpty { back(nil) } else { closeRequested?() }
     }
     @objc func refreshPage(_ sender: Any?) { loadCurrent(force: true) }
     @objc func loadMore(_ sender: Any?) { send(["op": "more", "key": location.key]) }
-    @objc func playPage(_ sender: Any?) {
-        if let target = pages[location.key]?.play { send(["op": "play", "target": target]) }
-    }
+    @objc func playPage(_ sender: Any?) { if let target = pages[location.key]?.play { send(["op": "play", "target": target]) } }
     @objc func toggle(_ sender: Any?) { send(["op": "transport", "action": "toggle"]) }
     @objc func previous(_ sender: Any?) { send(["op": "transport", "action": "previous"]) }
     @objc func next(_ sender: Any?) { send(["op": "transport", "action": "next"]) }
     @objc func shuffle(_ sender: Any?) { send(["op": "shuffle"]) }
-    @objc func seekChanged(_ sender: NSSlider) { send(["op": "seek", "value": sender.doubleValue]) }
-    @objc func volumeChanged(_ sender: NSSlider) { send(["op": "volume", "value": sender.doubleValue]) }
+    @objc func mute(_ sender: Any?) {
+        let value: Double = state.volume == 0 ? lastAudibleVolume : 0
+        send(["op": "volume", "value": value])
+    }
+    @objc func seekChanged(_ sender: NSSlider) {
+        renderTimes(sender.doubleValue)
+        if !seek.editing {
+            let value = sender.doubleValue
+            send(["op": "seek", "value": value])
+            sender.doubleValue = value; renderTimes(value)
+        }
+    }
+    private func commitSeek() {
+        if seekSongID == state.track?.id, state.track != nil, !state.loading { send(["op": "seek", "value": seek.doubleValue]) }
+        else { seek.maxValue = max(1, state.duration); seek.doubleValue = state.position; renderTimes(state.position) }
+        seekSongID = nil
+    }
+    @objc func volumeChanged(_ sender: NSSlider) {
+        let value = sender.doubleValue.rounded()
+        volume.toolTip = "Volume \(Int(value))%"
+        guard !volume.editing || lastSentVolume != value else { return }
+        lastSentVolume = value; send(["op": "volume", "value": value])
+    }
     @objc func dismissMessage(_ sender: Any?) { send(["op": "dismiss"]) }
-    @objc func reconnect(_ sender: Any?) { send(["op": "reconnect"]) }
+    @objc func reconnect(_ sender: Any?) { guard !state.account_checking else { return }; send(["op": "reconnect"]) }
     @objc func quit(_ sender: Any?) { send(["op": "quit"]) }
     @objc func addSong(_ sender: Any?) {
-        guard let song = state.track, state.signed_in, !state.adding else { return }
+        guard let song = state.track, state.signed_in, !state.adding, !state.loading else { return }
         var destination = Location.library(0); destination.song = song
         navigate(destination)
     }
-    @objc func activateRow(_ sender: Any?) { activateSelectedRow() }
     func activateSelectedRow() {
         let index = table.selectedRow
         guard rows.indices.contains(index), state.signed_in else { return }
         let row = rows[index]
         if let song = location.song, let playlist = row.editable {
-            send(["op": "add", "playlist": playlist, "video": song.id])
-            back(nil)
+            send(["op": "add", "playlist": playlist, "video": song.id]); back(nil)
         } else if let target = row.browse, let destination = Location.from(target, title: row.title) {
             navigate(destination)
-        } else if let target = row.play { send(["op": "play", "target": target]) }
+        } else if let target = row.play {
+            if row.video != nil && row.video == state.track?.id { toggle(nil) }
+            else {
+                if let id = row.video { pendingSong = Song(id: id, title: row.title, artist: row.subtitle) }
+                send(["op": "play", "target": target])
+            }
+        }
     }
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { MusicRowView() }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row index: Int) -> NSView? {
         guard rows.indices.contains(index) else { return nil }
         let identifier = NSUserInterfaceItemIdentifier("music-cell")
         let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? MusicCell ?? MusicCell()
-        cell.identifier = identifier
-        let row = rows[index]
-        setText(cell.title, row.title); setText(cell.subtitle, row.subtitle)
-        cell.toolTip = row.subtitle.isEmpty ? row.title : row.title + "\n" + row.subtitle
-        let icon = location.song != nil ? "plus" : (row.browse != nil ? "chevron.right" : "play.fill")
-        cell.accessory.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
-        cell.setAccessibilityLabel(row.title + (row.subtitle.isEmpty ? "" : ", " + row.subtitle))
-        return cell
+        cell.identifier = identifier; configure(cell, index); return cell
     }
 
     func controlTextDidChange(_ notification: Notification) {
         guard notification.object as AnyObject? === search else { return }
-        searchWork?.cancel()
-        if search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            history.removeAll(); navigate(.library(max(0, sections.selectedSegment)), remember: false)
-        } else {
-            let work = DispatchWorkItem { [weak self] in self?.searchNow(nil) }
-            searchWork = work; DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(280), execute: work)
+        enterSearch(immediate: false)
+    }
+    private func enterSearch(immediate: Bool) {
+        let query = String(search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).prefix(300))
+        searchWork?.cancel(); searchWork = nil
+        guard !query.isEmpty else {
+            searchPending = false
+            if !location.query.isEmpty { back(nil) }
+            return
+        }
+        guard state.signed_in else { return }
+        let target = encodeTarget("Search", ["query": query, "params": NSNull()])
+        guard let destination = Location.from(target, title: "Search") else { return }
+        let changed = location.key != destination.key
+        if changed { navigate(destination, remember: location.query.isEmpty, load: false) }
+        if !changed && !searchPending { return }
+        searchPending = true; browserDirty = true
+        if visible { render() }
+        if immediate { submitSearch() }
+        else {
+            let work = DispatchWorkItem { [weak self] in self?.submitSearch() }
+            searchWork = work; DispatchQueue.main.asyncAfter(deadline: .now() + Self.searchDelay, execute: work)
         }
     }
+    private func submitSearch() {
+        searchWork?.cancel(); searchWork = nil
+        guard searchPending, !location.query.isEmpty else { return }
+        searchPending = false; browserDirty = true
+        if visible { render() }
+        loadCurrent()
+    }
+    @objc func searchNow(_ sender: Any?) { enterSearch(immediate: true) }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         guard control === search else { return false }
         if commandSelector == NSSelectorFromString("moveDown:") || commandSelector == NSSelectorFromString("insertNewline:") {
             searchNow(nil)
-            if !rows.isEmpty {
-                if table.selectedRow < 0 { table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) }
-                view.window?.makeFirstResponder(table)
-            }
+            if !rows.isEmpty { table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false); view.window?.makeFirstResponder(table) }
             return true
         }
-        if commandSelector == NSSelectorFromString("cancelOperation:") && !search.stringValue.isEmpty {
-            search.stringValue = ""; history.removeAll()
-            navigate(.library(max(0, sections.selectedSegment)), remember: false)
-            return true
-        }
+        if commandSelector == NSSelectorFromString("cancelOperation:") { escape(); return true }
         return false
     }
-    @objc func searchNow(_ sender: Any?) {
-        searchWork?.cancel(); searchWork = nil
-        let query = search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty, state.signed_in else { return }
-        let target = encodeTarget("Search", ["query": String(query.prefix(300)), "params": NSNull()])
-        guard let destination = Location.from(target, title: "Search results"), destination.key != location.key else { return }
-        history = [.library(max(0, sections.selectedSegment))]
-        navigate(destination, remember: false)
-    }
 
-    func makeAccountMenu() -> NSMenu {
-        let menu = NSMenu(); menu.autoenablesItems = false
-        @discardableResult
-        func item(_ title: String, _ action: Selector? = nil) -> NSMenuItem {
-            let entry = NSMenuItem(title: title, action: action, keyEquivalent: "")
-            entry.target = self; entry.isEnabled = action != nil; menu.addItem(entry); return entry
-        }
-        accountInfo = item(state.account)
-        accountInfo?.toolTip = state.account
-        item("Open YouTube Music to sign in", #selector(openSignIn(_:)))
-        reconnectItem = item(state.account_checking ? "Connecting…" : "Reconnect", #selector(reconnect(_:)))
-        reconnectItem?.isEnabled = !state.account_checking
-        if !state.profiles.isEmpty {
-            menu.addItem(.separator())
-            for profile in state.profiles {
-                let entry = item(profile.label, #selector(selectProfile(_:)))
-                entry.representedObject = profile.id; entry.state = state.profile == profile.id ? .on : .off
-                entry.isEnabled = !state.account_checking
-            }
-        }
-        menu.addItem(.separator())
-        item("Full Disk Access…", #selector(openDiskAccess(_:)))
-        item("Connection help…", #selector(connectionHelp(_:)))
-        return menu
+    func focusSearch() {
+        guard state.signed_in else { return }
+        showingAccount = false; browserDirty = true
+        if visible { render(); view.window?.makeFirstResponder(search); search.selectText(nil) }
     }
     @objc func showAccount(_ sender: Any?) {
-        accountMenu = makeAccountMenu()
-        accountMenu?.popUp(positioning: nil, at: NSPoint(x: 0, y: accountButton.bounds.maxY + 4), in: accountButton)
-        accountMenu = nil; accountInfo = nil; reconnectItem = nil
+        showingAccount.toggle(); detailsVisible = false; browserDirty = true
+        if showingAccount { searchWork?.cancel(); searchWork = nil }
+        if visible { render() }
+        if !showingAccount { if searchPending { submitSearch() } else { loadCurrent() } }
     }
-    @objc private func selectProfile(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String else { return }
+    @objc private func selectProfile(_ sender: NSPopUpButton) {
+        guard let id = sender.selectedItem?.representedObject as? String, id != state.profile else { return }
         send(["op": "profile", "id": id])
     }
-    /// Open the selected browser. Never select another browser's account or
-    /// modify browser preferences; connecting still requires an explicit action.
+    @objc private func toggleDetails(_ sender: Any?) { detailsVisible.toggle(); browserDirty = true; if visible { render() } }
+    func makeMoreMenu() -> NSMenu {
+        let menu = NSMenu(); menu.autoenablesItems = false
+        for (title, action, key) in [("Open YouTube Music", #selector(openSignIn(_:)), ""), ("Full Disk Access…", #selector(openDiskAccess(_:)), ""), ("Quit YTfast", #selector(quit(_:)), "q")] {
+            if !key.isEmpty { menu.addItem(.separator()) }
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key); item.target = self; menu.addItem(item)
+        }
+        return menu
+    }
+    @objc private func showMore(_ sender: Any?) {
+        makeMoreMenu().popUp(positioning: nil, at: NSPoint(x: 0, y: overflowButton.bounds.maxY + 4), in: overflowButton)
+    }
     @objc func openSignIn(_ sender: Any?) {
         let workspace = NSWorkspace.shared
         let supported = ["com.google.Chrome", "com.brave.Browser", "org.chromium.Chromium"]
@@ -518,23 +644,13 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         let url = URL(string: "https://music.youtube.com/")!
         let bundle = workspace.urlForApplication(withBundleIdentifier: preferred)
             ?? (state.profile == nil ? supported.compactMap { workspace.urlForApplication(withBundleIdentifier: $0) }.first : nil)
-        if let bundle {
-            workspace.open([url], withApplicationAt: bundle, configuration: NSWorkspace.OpenConfiguration()) { _, error in
-                if error != nil { onMainRunLoop { [weak self] in self?.connectionHelp(nil) } }
-            }
-        } else { connectionHelp(nil) }
+        guard let bundle else { detailsVisible = true; showingAccount = true; browserDirty = true; if visible { render() }; return }
+        workspace.open([url], withApplicationAt: bundle, configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
+            guard error != nil else { return }
+            onMainRunLoop { self?.detailsVisible = true; self?.showingAccount = true; self?.browserDirty = true; if self?.visible == true { self?.render() } }
+        }
     }
     @objc private func openDiskAccess(_ sender: Any?) {
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
-    }
-    @objc private func connectionHelp(_ sender: Any?) {
-        let alert = NSAlert()
-        alert.messageText = "Connect YouTube Music"
-        let profile = state.profiles.first { $0.id == state.profile }?.label
-        let instruction = profile.map { "Sign in to YouTube Music in \($0). The browser may open its last-used profile; switch to this profile there." }
-            ?? "Sign in to YouTube Music in Chrome, Brave or Chromium."
-        alert.informativeText = instruction + " Give YTfast Full Disk Access in System Settings, then choose Reconnect. Allow the browser’s Safe Storage Keychain prompt if macOS asks.\n\nYTfast reads the selected browser’s session locally. Safari and Firefox sessions are not supported.\n\n" + state.account
-        alert.addButton(withTitle: "Done")
-        if let window = view.window { alert.beginSheetModal(for: window) } else { alert.runModal() }
     }
 }

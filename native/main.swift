@@ -53,7 +53,9 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         status.button?.image = image; status.button?.toolTip = "YTfast"
         status.button?.target = self; status.button?.action = #selector(togglePopover(_:))
         panel = PlayerPanel { [weak self] action in self?.send(action) }
-        popover.contentViewController = panel; popover.contentSize = NSSize(width: 380, height: 560)
+        panel.sizeChanged = { [weak self] size in self?.popover.contentSize = size }
+        panel.closeRequested = { [weak self] in self?.popover.performClose(nil) }
+        popover.contentViewController = panel; popover.contentSize = panel.preferredContentSize
         popover.behavior = .transient; popover.animates = false; popover.delegate = self
         if !testing { installApplicationMenu() }
     }
@@ -81,7 +83,7 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
     func popoverWillShow(_ notification: Notification) { status.button?.highlight(true); panel.opened() }
     func popoverDidClose(_ notification: Notification) { status.button?.highlight(false); panel.closed() }
-    @objc private func focusSearch(_ sender: Any?) { showPopover(); panel.view.window?.makeFirstResponder(panel.search) }
+    @objc private func focusSearch(_ sender: Any?) { showPopover(); panel.focusSearch() }
     @objc private func refreshLibrary(_ sender: Any?) { panel.refreshPage(sender) }
     @objc private func quit(_ sender: Any?) { send(["op": "quit"]) }
 

@@ -29,11 +29,12 @@ func consume(_ pointer: UnsafeMutablePointer<CChar>?) -> Data {
 }
 
 final class CoreAPI: PlayerAPI {
+    private let decoder = JSONDecoder()
     func send(_ action: [String: Any]) -> State? {
         guard let bytes = try? JSONSerialization.data(withJSONObject: action),
               let text = String(data: bytes, encoding: .utf8) else { return nil }
         let response = text.withCString { consume(ytfast_call($0)) }
-        if let state = try? JSONDecoder().decode(State.self, from: response) { return state }
+        if let state = try? decoder.decode(State.self, from: response) { return state }
         if let error = (try? JSONSerialization.jsonObject(with: response)) as? [String: Any] {
             fputs("YTfast: \(error["fatal"] as? String ?? "Invalid bridge response")\n", stderr)
         }
@@ -52,6 +53,14 @@ let playlistKey = "browse:\(playlistID):"
 struct Location {
     var target: String; var key: String; var title: String
     var song: Song?; var scroll = NSPoint.zero
+    var libraryIndex: Int? {
+        (0..<3).first { Location.library($0).key == key }
+    }
+    var query: String {
+        guard let object = try? JSONSerialization.jsonObject(with: Data(target.utf8)) as? [String: Any],
+              let search = object["Search"] as? [String: Any] else { return "" }
+        return search["query"] as? String ?? ""
+    }
     var identity: String { key + (song.map { ":add:\($0.id)" } ?? "") }
     static func library(_ index: Int) -> Location {
         let choices = [(playlistID, "Playlists"), ("FEmusic_liked_videos", "Liked Music"), ("FEmusic_liked_albums", "Albums")]

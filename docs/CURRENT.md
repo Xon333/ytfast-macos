@@ -1,51 +1,47 @@
 # Current state
 
-**Updated:** 7 October 2026
+**Updated:** 7 October 2026 · **Build:** 0.3.0, native UI polish
 
-**Version:** 0.3.0 · [Refinement and verification](https://github.com/Xon333/ytfast-macos/pull/1)
+[UI refinement](https://github.com/Xon333/ytfast-macos/pull/2) · [Architecture and bounds](MACOS.md)
 
-This page distinguishes measured native behavior from real-account observations about the preceding menu build. The product and exact resource bounds are defined in [MACOS](MACOS.md). Every Mac package embeds its exact checked-out source revision in `YTfast.app/Contents/Resources/source-revision.txt` and the `YTfastSourceRevision` Info.plist field.
+Each Mac package identifies its exact source commit in `YTfast.app/Contents/Resources/source-revision.txt` and the `YTfastSourceRevision` Info.plist field. Use that revision to distinguish builds sharing version 0.3.0.
 
-## Applied refinement
+## Applied changes
 
-- **Native popover:** persistent playback controls, seek/volume, direct search and library sections, inline navigation, reusable table rows and explicit loading/error states.
-- **Responsive library:** current lists survive refresh; validated account-scoped snapshots load alongside HTTPS; a late snapshot cannot replace fresh data.
-- **Playback preparation:** current/next stream lookups and player startup overlap; metadata is off the readiness path; cancellation, account boundaries and stale mpv events are handled explicitly.
-- **Account UX:** immediate Connecting state, usable sign-in/Reconnect/help actions, remembered browser selection and latest-attempt-only session publication. Verification blocks fresh playback and retires queued preparation while preserving controls for already-loaded audio.
-- **Audio and resources:** Premium-capable selection is retained; normalization applies attenuation only; page/URL caches and audio buffers remain bounded.
+The 360-point native popover now has consistent control sizes, a prominent Play/Pause/Cancel button, visible shuffle state, stable seek and volume dragging, mute/restore, compact library navigation and an inline account screen. Secondary actions are in More (…). The connection screen uses short status text and exposes detailed errors only on request.
 
-The Mac executable is AppKit linked to the Rust player core. Its `menubar` target excludes the desktop renderer and browser engines. A restored paused queue does not start playback/resolver helpers.
+Warm reopening preserves the destination, query, scroll and rows. Ordinary playback-position updates do not reload the catalogue. Arrow keys select without playing; Return activates. Activating the current song uses transport instead of fetching its queue again. A seek begun on one song cannot seek its successor.
 
-## Measured native snapshot
+Search feedback appears immediately, with a 180 ms request debounce instead of 280 ms. The small playlist index warms once after connection. Browsing does not start mpv, yt-dlp or Deno. The Rust/audio implementation, dependency set, Premium-capable stream selection, account boundaries and cache limits are unchanged by this polish.
 
-The macOS 15 Apple Silicon job in [Actions run 37650616566](https://github.com/Xon333/ytfast-macos/actions/runs/37650616566) passed against PR source [`124c7da`](https://github.com/Xon333/ytfast-macos/commit/124c7da0a32f22903da1e574088cf6eadbd7dca5), checked out as the PR merge revision `f18681bcf71a8399c31549b8adbd9842d38458a6`. Its [native artifact and captures](https://github.com/Xon333/ytfast-macos/actions/runs/37650616566/artifacts/11496038973) contain the measurements below. These are a dated snapshot; later verification of the account-transition barrier is recorded with the source in PR #1.
+## Verified evidence
 
-| Check | Observed result |
+[Actions run 37675046391](https://github.com/Xon333/ytfast-macos/actions/runs/37675046391) passed on macOS 15 Apple Silicon and Ubuntu for source `98d8e1566f7cfdb263d5d5a9e245201adf99ae31`, checked out as PR merge revision `cd4439325214326c28fce639aa660be378d08a40`.
+
+The [native artifact](https://github.com/Xon333/ytfast-macos/actions/runs/37675046391/artifacts/11507077375) contains the packaged app, UI fixtures, dark/light and connection-screen captures, and the measurements below. Its archive SHA-256 was independently checked: `7922b8f52345117b3358dcd2233f019777db3a67ae354a7c7bd9d499fc25a278`.
+
+| Check | Result |
 | --- | --- |
-| Renderer-free Rust release tests | 31 passed; one transport test excluded from this invocation |
-| Explicit production mpv transport test | Passed |
-| Native AppKit behavior checks | 16 passed |
-| Refresh/layout of a 1,000-row fixture | 6.93 ms; six row views instantiated |
-| Idle physical footprint after 15 seconds | 12,470,400 bytes (11.9 MiB) |
-| Idle RSS at the same sample | 55,951,360 bytes (53.4 MiB) |
-| Idle mpv, yt-dlp or Deno children | None |
+| Renderer-free Rust release suite | 34 passed; transport test run separately |
+| Production mpv IPC transport test | Passed |
+| Native UI checks | 37 passed |
+| Warm reopen handler, mean of 30 fixture cycles | 0.069 ms; zero table reloads |
+| 100 playback-position updates | Zero table reloads |
+| Apply/layout of 1,000 supplied rows | 11.44 ms; six row views instantiated |
+| Signed-out idle physical footprint after 15 seconds | 12.2 MiB |
+| Signed-out idle RSS at the same sample | 56.3 MiB |
+| Idle audio/resolver children | None |
 
-AppKit typechecking, Rust formatting/strict Clippy, renderer-free dependencies, packaging/ad-hoc signature, isolated launch and Show/Quit also passed. The README image is an actual native capture using synthetic music data, with both dark and light captures in the artifact.
+AppKit typechecking, formatting, strict Clippy, renderer-free dependencies, packaging/ad-hoc signature, isolated launch and Show/Quit passed. The production-view captures were inspected in light and dark appearances. The README uses a compressed native capture with synthetic data, not a mockup.
 
-The 1,000-row timing measures applying a supplied fixture and laying out the production AppKit table. It is not network latency or playback startup. The idle memory sample is from an isolated signed-out app on CI, not a real listening session or a controlled before/after comparison.
+The timings measure local fixture handling, not the complete click-to-visible animation or YouTube network latency. The memory sample is from isolated, signed-out CI; it is not comparable directly with a real listening session or a controlled before/after test. Final integration and its exact-source build are recorded in PR #2 and the repository's Actions history.
 
-Rust coverage includes frozen account credentials, profile failure without account fallback, obsolete connection results, snapshot privacy/expiry/bounds, account-scoped stream reuse, cancellation while loading, stale playback events and retained refresh rows. Native fixtures cover loading cancellation, captured Add-song identity, search deduplication, stable navigation, sign-in actions and connection progress.
+## Real-Mac observations and limits
 
-## Real-account evidence and limits
+Before this UI polish, the user confirmed that the app worked and reported approximately 33–50 MB RAM usage. Earlier reports confirmed working browser authentication after Full Disk Access, working library/playlists and Premium Opus playback. These are real-Mac observations about the preceding build, not new measurements of the polished build.
 
-On the preceding build, the user confirmed that Full Disk Access resolved Chromium authentication, library/playlists worked, and Premium playback used Premium Opus. Those are user-reported observations about that build, not newly repeated acceptance of this refinement.
+CI has no access to that browser session or physical audio devices. Live YouTube start/transition latency, account writes and audible output were not remeasured here. Distribution remains ad-hoc signed without notarization. The native interface omits artwork, Home/Lyrics and playlist editing beyond adding a song.
 
-This execution environment has no access to the user's Mac browser session or audio devices. Synthetic and CI checks do not establish the new build's live playlist writes, audible transitions, Bluetooth routing or live-session memory.
+## Earlier evidence
 
-The native product currently omits artwork, Home/Lyrics and playlist editing beyond adding a song. Distribution remains ad-hoc signed without notarization.
-
-## Historical evidence
-
-[macos-menubar-20261007.json](evidence/macos-menubar-20261007.json) retains the earlier signed-out comparison between the visible-window port and initial native menu at `b8e6d0cb…`. It measures those historical builds and is not a memory result for this popover.
-
-Use current source and the release's verified evidence to establish present behavior. Older desktop specifications and earlier implementation decisions are reference material.
+[Initial native refinement](https://github.com/Xon333/ytfast-macos/pull/1) and [macos-menubar-20261007.json](evidence/macos-menubar-20261007.json) retain their historical results. Their memory figures do not describe this UI build.
