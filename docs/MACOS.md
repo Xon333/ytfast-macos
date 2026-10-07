@@ -1,18 +1,20 @@
 # macOS product and architecture
 
-YTfast is a lean native YouTube Music menu-bar player. The current implementation uses one AppKit popover and one Rust player owner. These choices describe the applied design; current user direction and evidence can justify replacing them.
+YTfast is a lean native YouTube Music menu-bar player with one AppKit popover and one Rust playback owner.
 
 ## Interface
 
-The popover keeps the title, artist, previous/play-pause/next, shuffle, seek, volume and audio/loading status visible above the browser.
+The 360-point AppKit popover sizes its content to the view: a compact connection screen, or up to six visible music rows with a scrolling list. Playback controls remain above the list. The circular Play/Pause control becomes Cancel while a start is pending; shuffle has a visible toggle state. Seek previews the position during dragging and commits on release. Volume includes mute/restore. Quit and secondary actions live in More (…).
 
-Search and **Playlists / Liked Music / Albums** are directly accessible. Search waits 280 ms after typing, or runs immediately on Return. Playlists, albums and search destinations open inline; Back restores the preceding location. A reusable-cell `NSTableView` displays the list, with Load more for continuations.
+**Search / Playlists / Liked / Albums** are direct destinations. Search displays local loading state immediately, waits 180 ms before a network request, and runs on Return. Selecting the current song uses transport rather than fetching its queue again. The small playlist index warms once after account connection; no audio/resolver process is started for browsing.
 
-Refresh retains visible rows and reports progress. Account-scoped disk snapshots can supply the initial list while HTTPS runs. A failed refresh keeps the existing list and displays the error.
+Playlists, albums and search destinations open inline. Back restores their query and scroll position; closing/reopening preserves the current destination. Position ticks and unchanged warm opens do not rebuild the table. `NSTableView` instantiates reusable visible cells, not a view per song. Refresh retains the visible list while the account-scoped snapshot and HTTPS path run.
 
-**Add song to playlist** captures the song when Add is opened and offers only server-confirmed editable destinations. Playback advancing does not change that captured target.
+Arrow keys select without playing. Return activates, Space controls playback, Escape goes back, Command-F focuses search and Command-R refreshes. Controls use native accessibility labels and dynamic system colors with explicit SF Symbol sizes and hover/selected states. No animation clock or per-row backing layers are added.
 
-The Account control exposes connection status, Reconnect, supported browser/profile selection, browser sign-in, Full Disk Access and connection help. Connecting state updates immediately. Native keyboard and accessibility controls remain available; closing the popover does not stop playback.
+**Add to playlist** captures the playing song and shows only server-confirmed editable destinations. Playback advancing does not change the add target. A seek begun on one song cannot affect its successor; backend updates do not move a slider being dragged.
+
+**Account** opens an inline connection view. Sign in opens the selected supported browser; Connect/Reconnect rechecks its session. A profile picker appears only when there is a choice. An unavailable selected profile is identified rather than displayed as a different account. Browser-access errors show a Full Disk Access action, and detailed errors are available on demand. Successful action notices clear after a one-shot delay; errors stay actionable.
 
 ## Ownership
 
@@ -28,7 +30,7 @@ The Swift executable links the Rust core statically. The `menubar` dependency gr
 
 The app is an `LSUIElement` with one status item and no normal Dock window. The separate macOS global Now Playing item is OS-owned. mpv's own media-key handling is disabled so native controls retain one owner.
 
-The optional `desktop-ui` target is separate from the Mac package. Retaining its old architecture is not a constraint on future Mac refinement.
+The optional `desktop-ui` target is separate from the Mac package.
 
 ## Playback path
 
@@ -54,7 +56,7 @@ When enabled, loudness normalization uses YouTube's metadata with attenuation on
 | mpv forward / back buffers | 4 MiB / 1 MiB |
 | mpv read-ahead | 60 seconds |
 
-Pages load on demand. No artwork, Home feed or lyrics are fetched for the native interface. Bounds limit individual caches and buffers; they are not a total-process memory guarantee.
+The small playlist index warms after connection; other pages load on demand. No artwork, Home feed or lyrics are fetched for the native interface. Bounds limit individual caches and buffers; they are not a total-process memory guarantee.
 
 ## Authentication and account isolation
 
@@ -82,7 +84,9 @@ There is no YTfast backend or telemetry. Authenticated traffic goes directly to 
 
 ## Design provenance
 
-[Sonora](https://github.com/sonorahq/sonora) was inspected across its YouTube provider, playback/preload, snapshot, auth/session, state and native-menu architecture. The applied ideas are retained snapshots during refresh, bounded preparation, explicit asynchronous state and account isolation. YTfast keeps its own InnerTube/yt-dlp/mpv implementation. No GPL source was copied into this MIT project.
+[Sonora](https://github.com/sonorahq/sonora) informed the existing playback preparation, snapshot and account-isolation design. YTfast keeps its own InnerTube/yt-dlp/mpv implementation.
+
+For native interaction, [MonitorControl's slider handler](https://github.com/MonitorControl/MonitorControl/blob/84ac2d72bfb53b653536e484946f6ed027e4229c/MonitorControl/Support/SliderHandler.swift) informed explicit mouse-tracking ownership and compact volume controls. [Maccy's popup model](https://github.com/p0deje/Maccy/blob/a92c11ae3e7a86a57dc6359bad59e330e4625ede/Maccy/Observables/Popup.swift) informed compact sizing and the separation of navigation from activation. These patterns are independently implemented with AppKit; no external UI framework or GPL source was incorporated.
 
 ## Build and evidence
 
@@ -94,4 +98,4 @@ scripts/build-macos.sh
 
 Outputs are `dist/YTfast.app` and `dist/ytfast-macos-<arch>.zip`. The app is ad-hoc signed and is not notarized.
 
-See [CURRENT](CURRENT.md) for dated evidence and material limits, and [AGENTS](../AGENTS.md#verification) for focused checks. Current code and verified behavior take precedence over inherited [SPEC](SPEC.md) and [integration research](integration.md).
+See [CURRENT](CURRENT.md) for dated evidence and material limits, and [AGENTS](../AGENTS.md#verification) for focused checks. [SPEC](SPEC.md) and [integration research](integration.md) retain the inherited desktop reference material.

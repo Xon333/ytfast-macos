@@ -353,7 +353,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         shuffleButton.isOn = state.shuffle; shuffleButton.setAccessibilityValue(state.shuffle ? 1 : 0)
         shuffleButton.setSymbol("shuffle", state.shuffle ? "Shuffle on" : "Shuffle off")
         addButton.isEnabled = state.signed_in && state.track != nil && !state.loading && !state.adding
-        addButton.setSymbol(state.adding ? "checkmark" : "plus", state.adding ? "Adding…" : "Add to playlist")
+        addButton.setSymbol("plus", state.adding ? "Adding…" : "Add to playlist")
         seek.isEnabled = state.track != nil && state.duration > 0 && !state.loading
         if !seek.editing { seek.maxValue = max(1, state.duration); seek.doubleValue = state.position }
         if !volume.editing { volume.doubleValue = state.volume }
@@ -498,7 +498,10 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
     @objc func previous(_ sender: Any?) { send(["op": "transport", "action": "previous"]) }
     @objc func next(_ sender: Any?) { send(["op": "transport", "action": "next"]) }
     @objc func shuffle(_ sender: Any?) { send(["op": "shuffle"]) }
-    @objc func mute(_ sender: Any?) { send(["op": "volume", "value": state.volume == 0 ? lastAudibleVolume : 0]) }
+    @objc func mute(_ sender: Any?) {
+        let value: Double = state.volume == 0 ? lastAudibleVolume : 0
+        send(["op": "volume", "value": value])
+    }
     @objc func seekChanged(_ sender: NSSlider) {
         renderTimes(sender.doubleValue)
         if !seek.editing {
