@@ -1,6 +1,6 @@
-# Integration facts and design
+# Integration facts and design — inherited research
 
-> macOS menu-bar scope and current verification: [MACOS.md](MACOS.md). The desktop-UI requirements below describe the retained legacy build.
+> **Reference status:** this is dated upstream/Linux integration research plus retained technical facts. It is not the current macOS product scope. For Mac architecture use [MACOS.md](MACOS.md); for the tested current cut use [CURRENT.md](CURRENT.md). Reuse only the specific fact needed and revalidate it when platform/version-sensitive.
 
 Read this before touching sign-in, playback or the build. Update it when a fact is disproven or a technical choice is made. Facts are dated because YouTube changes.
 
