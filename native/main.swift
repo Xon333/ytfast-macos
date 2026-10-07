@@ -201,7 +201,10 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func refresh() {
-        guard !shuttingDown, !refreshBusy else { return }
+        // Common-mode wakes can arrive during AppKit startup, before the
+        // launch delegate has created its status item. The launch snapshot
+        // drains all accumulated events once setup is complete.
+        guard status != nil, !shuttingDown, !refreshBusy else { return }
         refreshBusy = true
         defer { refreshBusy = false }
         if let next = api.send(["op":"poll"]) { apply(next) }
@@ -224,10 +227,10 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         messageItem.isHidden = message == nil
         messageItem.title = short(message ?? "")
         messageItem.toolTip = message.map { $0 + " (click to copy)" }
+        let old = pages
         if !next.signed_in { pages.removeAll() }
         if let updates = next.pages {
-            let old = pages
-            pages = Dictionary(uniqueKeysWithValues: updates.map {($0.key,$0)})
+            pages = next.signed_in ? Dictionary(uniqueKeysWithValues: updates.map {($0.key,$0)}) : [:]
             // Iterate a copy: rebuilding a menu can install nested submenu delegates.
             let refs = dynamic
             for ref in refs {
@@ -445,7 +448,10 @@ func selfTest() {
         rows:[Row(title:"Owned",subtitle:"",play:nil,browse:nil,video:nil,editable:"PLowned"),
               Row(title:"Subscribed",subtitle:"",play:nil,browse:nil,video:nil,editable:nil)],
         play:nil,loading:false,more:false,message:nil)]
-    let controller=MenuApp(api:api,testing:true);controller.setup();controller.refresh()
+    let controller=MenuApp(api:api,testing:true)
+    controller.refresh() // A backend wake may precede applicationDidFinishLaunching.
+    precondition(api.sent.isEmpty)
+    controller.setup();controller.refresh()
     precondition(controller.status.menu === controller.menu)
     precondition(controller.shuffleItem.state == .off)
     controller.choose(controller.shuffleItem)
@@ -474,7 +480,8 @@ func selfTest() {
     api.state.signed_in=false;api.state.pages=[];controller.refresh()
     precondition(!controller.libraryItem.isEnabled && !controller.addItem.isEnabled)
     precondition(controller.pages.isEmpty)
-    let payload:[String:Any]=["result":"pass","checks":["one_status_item","shuffle_dispatch","editable_only","captured_song","bounded_playlist_menus","signed_out_gating"],"memory":memorySample()]
+    precondition(!add.items.contains {$0.title == "Playlist 0"})
+    let payload:[String:Any]=["result":"pass","checks":["prelaunch_wake","one_status_item","shuffle_dispatch","editable_only","captured_song","bounded_playlist_menus","signed_out_gating"],"memory":memorySample()]
     print(String(decoding:try! JSONSerialization.data(withJSONObject:payload,options:[.prettyPrinted,.sortedKeys]),as:UTF8.self))
     NSStatusBar.system.removeStatusItem(controller.status)
 }

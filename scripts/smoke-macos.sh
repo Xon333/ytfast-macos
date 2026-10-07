@@ -1,38 +1,64 @@
 #!/bin/bash
-# Fresh-runner native menu smoke test. No real account is accessed.
+# Isolated native-menu smoke and idle-memory sample. Never a real browser account.
 set -euo pipefail
-[[ "$(uname -s)" == Darwin && "${GITHUB_ACTIONS:-}" == true ]] || exit 2
+[[ "$(uname -s)" == Darwin ]] || exit 2
+[[ "${GITHUB_ACTIONS:-}" == true ]] || { echo 'Use the CI runner for this isolated smoke test.' >&2; exit 2; }
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 binary="$repo/dist/YTfast.app/Contents/MacOS/ytfast"
-mkdir -p "$repo/artifacts/native"
-"$binary" --self-test > "$repo/artifacts/native/menu-tests.json"
-[[ ! -S "/tmp/ytfast-$(id -u)/ytfast.sock" ]] || { echo 'Another instance is active.' >&2; exit 1; }
+real_home="$HOME"
 home="$(mktemp -d)"
 pid=''
 cleanup() {
+  result=$?
+  if [[ "$result" != 0 ]]; then
+    for log in stdout stderr; do
+      [[ ! -f "$home/$log" ]] || cp "$home/$log" "$repo/artifacts/native/startup-$log.txt"
+    done
+    # The CI runner has no real account. Capture only this app's crash report.
+    sleep 3
+    for report in "$real_home/Library/Logs/DiagnosticReports"/ytfast*.ips "$home/Library/Logs/DiagnosticReports"/ytfast*.ips; do
+      [[ ! -f "$report" ]] || cp "$report" "$repo/artifacts/native/"
+    done
+  fi
   [[ -z "$pid" ]] || kill "$pid" 2>/dev/null || true
   rm -rf "$home"
 }
 trap cleanup EXIT
-export HOME="$home"
-export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+mkdir -p "$repo/artifacts/native"
+"$binary" --self-test > "$repo/artifacts/native/menu-tests.json"
+export HOME="$home" PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export YTFAST_PROFILE_FILE="$repo/artifacts/native/idle-memory.json"
+if "$binary" show >/dev/null 2>&1 && [[ -S "/tmp/ytfast-$(id -u)/ytfast.sock" ]]; then
+  echo 'An instance is already running; refusing to disturb it.' >&2; exit 2
+fi
 "$binary" > "$home/stdout" 2> "$home/stderr" &
 pid=$!
-for _ in {1..45}; do
-  [[ -f "$YTFAST_PROFILE_FILE" ]] && break
+for _ in {1..50}; do
   kill -0 "$pid" 2>/dev/null || { cat "$home/stderr"; exit 1; }
-  sleep 1
+  [[ -s "$YTFAST_PROFILE_FILE" ]] && break
+  sleep 0.5
 done
-[[ -f "$YTFAST_PROFILE_FILE" ]] || { cat "$home/stderr"; echo 'No native main-loop sample.'; exit 1; }
+[[ -s "$YTFAST_PROFILE_FILE" ]] || { cat "$home/stderr"; echo 'Memory sample absent' >&2; exit 1; }
 ps -p "$pid" -o pid=,rss=,%cpu=,comm= > "$repo/artifacts/native/idle-process.txt"
-# A restored, paused native session does not spawn playback/resolution helpers.
-if pgrep -P "$pid" 'mpv|yt-dlp|deno' > /dev/null; then echo 'Unexpected idle playback helper'; exit 1; fi
+# The signed-out, empty-session idle app must not launch mpv/yt-dlp/deno.
+if pgrep -P "$pid" -x 'mpv|yt-dlp|deno' >/dev/null; then
+  echo 'Unexpected idle playback/resolver child' >&2; exit 1
+fi
 "$binary" show
-sleep 1
 "$binary" quit
-for _ in {1..20}; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-if kill -0 "$pid" 2>/dev/null; then echo 'Quit did not stop the app'; exit 1; fi
+for _ in {1..40}; do
+  kill -0 "$pid" 2>/dev/null || break
+  sleep 0.25
+done
+if kill -0 "$pid" 2>/dev/null; then echo 'Quit did not finish' >&2; exit 1; fi
 wait "$pid"
 pid=''
-printf 'PASS: native menu, synthetic actions, isolated startup, no idle playback helpers, CLI Show/Quit.\n'
+python3 - "$repo/artifacts/native" <<'PY'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); data=json.loads(p.joinpath('idle-memory.json').read_text())
+assert data['task_info_ok']
+assert data['rss_bytes']>0 and data['physical_footprint_bytes']>0
+print(json.dumps(data,indent=2))
+print('Native menu: launch, Show, Quit, no idle audio children: PASS')
+PY
