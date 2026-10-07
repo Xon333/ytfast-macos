@@ -1,6 +1,6 @@
-# ytfast specification
+# ytfast specification — inherited desktop product
 
-> macOS menu-bar scope and current verification: [MACOS.md](MACOS.md). The desktop-UI requirements below describe the retained legacy build.
+> **Reference status:** this is the retained upstream/Linux desktop specification. It is not the current macOS product contract. For Mac scope use [MACOS.md](MACOS.md); for the tested current cut use [CURRENT.md](CURRENT.md). Historical desktop requirements below must not silently expand the menu-bar build.
 
 ytfast is a native YouTube Music client for Omarchy: a Rust + egui desktop app that looks and works like YouTube Music, starts instantly and keeps playing reliably. It follows the pattern of [ZapFast](https://github.com/crmne/zapfast) (WhatsApp) and [Spotifast](https://github.com/crmne/spotifast) (Spotify): no browser engine, no telemetry, no hosted backend.
 
