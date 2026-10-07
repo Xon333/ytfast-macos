@@ -12,6 +12,68 @@ pub(super) struct NextStream {
 }
 
 impl super::Worker {
+    pub(super) fn fresh_playback_allowed(&self) -> bool {
+        if self.account_checking {
+            self.sink.send(Event::Error(
+                "Connecting… Try playback when the account is ready.".into(),
+            ));
+            false
+        } else {
+            true
+        }
+    }
+
+    /// Checking suspends fresh playback without exposing the old session as a
+    /// guest or destroying its scoped URL cache. The loaded current entry is
+    /// the only stream allowed to remain in mpv.
+    pub(super) async fn begin_account_check(&mut self) {
+        self.account_checking = true;
+        let pending_start = self.starting || self.waiting_for_network;
+        self.new_epoch();
+        self.generation += 1;
+        self.cancel_resolution();
+        for (_, (_, task)) in self.player_requests.drain() {
+            task.abort();
+        }
+        self.ready_next = None;
+        self.appended = None;
+        self.finish_blend().await;
+        self.drop_cued().await;
+        if self.state.audition.is_some() {
+            self.end_audition().await;
+        }
+        let mut keep_current = !pending_start && self.current_entry.is_some() && !self.idle;
+        if let Some(mpv) = &self.mpv {
+            if keep_current {
+                // Atomic playlist clearing cannot advance to a removed next
+                // entry, unlike removing index 1 if EOF already selected it.
+                let cleared = mpv.command(json!(["playlist-clear"])).await.is_ok();
+                let kept = if cleared {
+                    mpv.get("playlist/0/id")
+                        .await
+                        .ok()
+                        .and_then(|value| value.as_i64())
+                } else {
+                    None
+                };
+                keep_current = kept == self.current_entry;
+            }
+            if !keep_current {
+                let _ = mpv.command(json!(["stop"])).await;
+            }
+        }
+        self.starting = false;
+        if !keep_current {
+            self.current_entry = None;
+            self.buffering = false;
+            self.seeking = false;
+            self.idle = true;
+            self.paused = true;
+            self.resume_at = Some(self.state.position);
+        }
+        self.update_transport();
+    }
+
     /// A play request replaces the queue: results of earlier ones no longer apply.
     pub(super) fn new_epoch(&mut self) -> u64 {
         self.epoch += 1;
@@ -30,6 +92,9 @@ impl super::Worker {
     /// Fetch a chosen list without letting an earlier pending song win while
     /// the request is in flight. The selected target survives a loading Pause.
     pub(super) async fn play_target(&mut self, target: Target) {
+        if !self.fresh_playback_allowed() {
+            return;
+        }
         let epoch = self.new_epoch();
         self.cancel_resolution();
         self.generation += 1;
@@ -106,6 +171,10 @@ impl super::Worker {
     /// Pause remains useful before audio starts: cancel the pending work and
     /// leave the selection/seek position ready for a later Play.
     pub(super) async fn toggle_pause(&mut self) {
+        if self.account_checking && (self.current_entry.is_none() || self.idle) {
+            self.fresh_playback_allowed();
+            return;
+        }
         if self.starting || self.waiting_for_network {
             self.cancel_resolution();
             if let Some(task) = self.queue_request.take() {
@@ -291,6 +360,9 @@ impl super::Worker {
 
     /// Starts the track at `pos`, from `at` seconds in.
     pub(super) async fn start_at(&mut self, pos: usize, at: Option<f64>) {
+        if !self.fresh_playback_allowed() {
+            return;
+        }
         let Some(track) = self.track_at(pos).cloned() else {
             return;
         };
@@ -356,6 +428,11 @@ impl super::Worker {
     /// taken before the previous song's resolve and the old prefetch are
     /// stopped, so a song that was next keeps resolving as it becomes current.
     pub(super) fn resolve_current(&mut self, video_id: &str) {
+        if !self.fresh_playback_allowed() {
+            self.starting = false;
+            self.update_transport();
+            return;
+        }
         let generation = self.generation;
         let request = self.resolver.request(video_id);
         self.starting = true;
@@ -389,7 +466,7 @@ impl super::Worker {
     }
 
     pub(super) fn fetch_watch_info(&self, video_id: &str) {
-        if cfg!(feature = "menubar") {
+        if self.account_checking || cfg!(feature = "menubar") {
             // Lyrics, related music and this response's like status have no
             // native consumer. Do not fetch a full radio solely to discard it.
             return;
@@ -420,6 +497,9 @@ impl super::Worker {
     /// Resolve the next song at once. Its optional loudness/history request
     /// runs independently so it cannot delay a ready stream's handoff.
     pub(super) fn prefetch(&mut self) {
+        if self.account_checking {
+            return;
+        }
         let Some(pos) = self.pos else { return };
         if let Some(after) = self.track_at(pos + 2) {
             let id = after.video_id.clone();
@@ -473,6 +553,19 @@ impl super::Worker {
     }
 
     pub(super) async fn next(&mut self, automatic: bool) {
+        if self.account_checking {
+            if automatic {
+                self.current_entry = None;
+                self.idle = true;
+                self.starting = false;
+                self.buffering = false;
+                self.seeking = false;
+                self.update_transport();
+            } else {
+                self.fresh_playback_allowed();
+            }
+            return;
+        }
         let Some(pos) = self.pos else { return };
         if self.decks.blending() {
             if !automatic {
@@ -579,6 +672,9 @@ impl super::Worker {
     /// Autoplay: when the last track in the queue is playing, fetch a radio
     /// to follow it.
     pub(super) fn maybe_extend(&mut self) {
+        if self.account_checking {
+            return;
+        }
         let Some(pos) = self.pos else { return };
         if self.state.autoplay && !self.extending && pos + 1 >= self.queue.len() {
             self.extend(false);
@@ -629,7 +725,7 @@ impl super::Worker {
     pub(super) async fn internal(&mut self, message: Internal) {
         match message {
             Internal::Connected(result) => self.connected(result).await,
-            Internal::AuthFailed(epoch) => self.auth_failed(epoch),
+            Internal::AuthFailed(epoch) => self.auth_failed(epoch).await,
             Internal::Started { generation, result } => {
                 if generation != self.generation {
                     return;
@@ -839,6 +935,9 @@ impl super::Worker {
     }
 
     async fn queue_next(&mut self, next: NextStream) {
+        if self.account_checking {
+            return;
+        }
         let NextStream {
             id,
             video_id,
@@ -1200,6 +1299,133 @@ mod tests {
             like: None,
             set_video_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn checking_blocks_new_playback_and_cancels_preparation_without_losing_cached_scope() {
+        let (mut worker, _dir) = worker();
+        let (sent, events) = std::sync::mpsc::channel();
+        worker.sink.tx = sent;
+        let cached = json!({
+            "scope": "previous-account",
+            "streams": { "selected": {
+                "itag": 774, "url": "https://example.invalid/private-stream", "user_agent": null,
+                "expires": resolver::now() + 3600
+            }}
+        });
+        crate::paths::write_atomic(
+            &worker.paths.runtime.join("streams.json"),
+            cached.to_string().as_bytes(),
+        )
+        .unwrap();
+        worker.resolver = Arc::new(Resolver::new(worker.paths.runtime.clone()));
+        worker.resolver.set_cookie_file(
+            Some(worker.paths.runtime.join("cookies-previous")),
+            Some("previous-account".into()),
+        );
+        worker.set_queue(vec![track("selected"), track("next")], 0);
+        worker.starting = true;
+        let resolving = tokio::spawn(std::future::pending::<()>());
+        let prefetching = tokio::spawn(std::future::pending::<()>());
+        let queue = tokio::spawn(std::future::pending::<()>());
+        worker.resolving = Some(resolving.abort_handle());
+        worker.prefetching = Some(prefetching.abort_handle());
+        worker.queue_request = Some(queue.abort_handle());
+        worker.begin_account_check().await;
+        assert!(resolving.await.unwrap_err().is_cancelled());
+        assert!(prefetching.await.unwrap_err().is_cancelled());
+        assert!(queue.await.unwrap_err().is_cancelled());
+        assert!(worker.account_checking);
+        assert!(!worker.state.loading);
+        assert_eq!(worker.resolver.cached("selected").unwrap().itag, 774);
+        let generation = worker.generation;
+        worker
+            .command(Command::PlayTracks {
+                tracks: vec![track("other")],
+                start: 0,
+            })
+            .await;
+        worker.play_target(Target::browse("other-playlist")).await;
+        worker.next(false).await;
+        worker.toggle_pause().await;
+        worker.prefetch();
+        worker.maybe_extend();
+        assert_eq!(worker.generation, generation);
+        assert_eq!(worker.current().unwrap().video_id, "selected");
+        assert!(worker.resolving.is_none());
+        assert!(worker.prefetching.is_none());
+        assert!(worker.queue_request.is_none());
+        assert_eq!(events.try_iter().filter(|event| matches!(event, Event::Error(message) if message.starts_with("Connecting"))).count(), 4);
+    }
+
+    #[tokio::test]
+    async fn checking_retires_successor_and_keeps_loaded_current_pause_resume() {
+        let (mut worker, _dir) = worker();
+        let (mpv, mut commands) = Mpv::test_ipc(1);
+        worker.mpv = Some(mpv);
+        worker.set_queue(vec![track("current"), track("next")], 0);
+        worker.current_entry = Some(1);
+        worker.appended = Some(Appended {
+            id: worker.queue.id(1).unwrap(),
+            itag: 774,
+            entry: 2,
+            gain: None,
+        });
+        worker.idle = false;
+        worker.update_transport();
+        worker.begin_account_check().await;
+        assert_eq!(commands.recv().await.unwrap(), json!(["playlist-clear"]));
+        assert_eq!(
+            commands.recv().await.unwrap(),
+            json!(["get_property", "playlist/0/id"])
+        );
+        assert_eq!(worker.current_entry, Some(1));
+        assert!(worker.state.playing);
+        assert!(!worker.state.next_ready);
+        assert!(worker.appended.is_none());
+        worker.toggle_pause().await;
+        assert_eq!(
+            commands.recv().await.unwrap(),
+            json!(["set_property", "pause", true])
+        );
+        assert!(!worker.state.playing);
+        worker.toggle_pause().await;
+        assert_eq!(
+            commands.recv().await.unwrap(),
+            json!(["set_property", "pause", false])
+        );
+        assert!(worker.state.playing);
+        worker.next(false).await;
+        assert!(
+            commands.try_recv().is_err(),
+            "Next must not reach mpv while Checking"
+        );
+    }
+
+    #[tokio::test]
+    async fn checking_stops_a_successor_that_crossed_eof_before_it_was_cleared() {
+        let (mut worker, _dir) = worker();
+        let (mpv, mut commands) = Mpv::test_ipc(2);
+        worker.mpv = Some(mpv);
+        worker.set_queue(vec![track("current"), track("next")], 0);
+        worker.current_entry = Some(1);
+        worker.appended = Some(Appended {
+            id: worker.queue.id(1).unwrap(),
+            itag: 774,
+            entry: 2,
+            gain: None,
+        });
+        worker.idle = false;
+        worker.begin_account_check().await;
+        assert_eq!(commands.recv().await.unwrap(), json!(["playlist-clear"]));
+        assert_eq!(
+            commands.recv().await.unwrap(),
+            json!(["get_property", "playlist/0/id"])
+        );
+        assert_eq!(commands.recv().await.unwrap(), json!(["stop"]));
+        assert!(worker.current_entry.is_none());
+        assert!(!worker.state.playing);
+        assert!(!worker.state.loading);
     }
 
     #[tokio::test]

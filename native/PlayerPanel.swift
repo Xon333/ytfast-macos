@@ -306,7 +306,8 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
             playButton.toolTip = playLabel; playButton.setAccessibilityLabel(playLabel)
         }
         playButton.isEnabled = state.track != nil || state.loading
-        previousButton.isEnabled = state.track != nil; nextButton.isEnabled = state.track != nil
+        previousButton.isEnabled = state.track != nil && !state.account_checking
+        nextButton.isEnabled = state.track != nil && !state.account_checking
         shuffleButton.contentTintColor = state.shuffle ? .controlAccentColor : .labelColor
         shuffleButton.setAccessibilityValue(state.shuffle ? "On" : "Off")
         addButton.isEnabled = state.signed_in && state.track != nil && !state.adding

@@ -384,6 +384,8 @@ struct Worker {
     last_connect: Option<Instant>,
     connect_epoch: u64,
     connecting: Option<tokio::task::AbortHandle>,
+    /// No fresh playback can use the previous resolver session while checking.
+    account_checking: bool,
     session_cookie: Option<session::CookieFile>,
     last_death: Option<Instant>,
 
@@ -468,6 +470,7 @@ impl Worker {
             last_connect: None,
             connect_epoch: 0,
             connecting: None,
+            account_checking: false,
             session_cookie: None,
             last_death: None,
             queue: queue::Queue::default(),
@@ -522,7 +525,7 @@ impl Worker {
         let mut internal = self.internal_rx.take().expect("internal receiver");
         let mut mpv_events = self.mpv_rx.take().expect("mpv receiver");
         self.restore_session();
-        self.connect();
+        self.connect().await;
         loop {
             tokio::select! {
                 command = commands.recv() => match command {
@@ -622,6 +625,9 @@ impl Worker {
                 }
             }
             Command::PlayTracks { tracks, start } => {
+                if !self.fresh_playback_allowed() {
+                    return;
+                }
                 self.new_epoch();
                 self.set_queue(tracks, start);
                 if let Some(pos) = self.pos {
@@ -681,7 +687,7 @@ impl Worker {
                     self.start(pos).await;
                 }
             }
-            Command::Reconnect => self.connect(),
+            Command::Reconnect => self.connect().await,
             Command::UseProfile(profile) => {
                 let mut settings = crate::settings::Settings::load(&self.paths);
                 settings.browser_profile = Some(profile);
@@ -691,7 +697,7 @@ impl Worker {
                     }));
                     return;
                 }
-                self.connect();
+                self.connect().await;
             }
             Command::Notifications(on) => {
                 let mut settings = crate::settings::Settings::load(&self.paths);
@@ -727,8 +733,16 @@ impl Worker {
             }
             Command::AccountEdit { op, edit, refresh } => self.account_edit(op, edit, refresh),
             Command::LikeStatus(video_id) => self.like_status(video_id),
-            Command::Prepare(video_id) => self.resolver.prepare(&video_id),
-            Command::PrepareMany(video_ids) => self.resolver.prepare_many(video_ids),
+            Command::Prepare(video_id) => {
+                if !self.account_checking {
+                    self.resolver.prepare(&video_id);
+                }
+            }
+            Command::PrepareMany(video_ids) => {
+                if !self.account_checking {
+                    self.resolver.prepare_many(video_ids);
+                }
+            }
             Command::PlayNext(tracks) => self.add(tracks, true).await,
             Command::AddToQueue(tracks) => self.add(tracks, false).await,
             Command::RemoveFromQueue(at) => {

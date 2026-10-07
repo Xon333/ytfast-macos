@@ -506,7 +506,11 @@ impl Core {
         while let Ok(event) = self.backend.events.try_recv() {
             match event {
                 Event::Account(account) => {
-                    if !matches!(account, Account::SignedIn { .. }) {
+                    if !matches!(account, Account::SignedIn { .. })
+                        || matches!(self.account, Account::Checking)
+                    {
+                        // A settled attempt also clears temporary playback
+                        // feedback raised while the connection was pending.
                         self.clear_account();
                     }
                     self.account = account;

@@ -203,6 +203,50 @@ impl Mpv {
         Ok(mpv)
     }
 
+    /// A local IPC responder for account-barrier state tests. Native CI tests
+    /// the playlist-clear command and actual transport against real mpv.
+    #[cfg(test)]
+    pub(crate) fn test_ipc(kept_entry: i64) -> (Arc<Self>, mpsc::UnboundedReceiver<Value>) {
+        let (socket, peer) = UnixStream::pair().expect("local IPC pair");
+        let (_reader, writer) = socket.into_split();
+        let pending: Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<Value>>>> = Arc::default();
+        let replies = pending.clone();
+        let (sent, commands) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(peer).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let request: Value = serde_json::from_str(&line).expect("IPC request");
+                let command = request["command"].clone();
+                let data = if command == json!(["get_property", "playlist/0/id"]) {
+                    json!(kept_entry)
+                } else {
+                    Value::Null
+                };
+                let _ = sent.send(command);
+                if let Some(reply) = replies
+                    .lock()
+                    .expect("pending lock")
+                    .remove(&request["request_id"].as_u64().expect("request id"))
+                {
+                    let _ = reply.send(json!({ "error": "success", "data": data }));
+                }
+            }
+        });
+        let child = tokio::process::Command::new("/usr/bin/true")
+            .spawn()
+            .expect("fixture child");
+        (
+            Arc::new(Self {
+                serial: 0,
+                writer: Mutex::new(writer),
+                next_id: AtomicU64::new(1),
+                pending,
+                _child: child,
+            }),
+            commands,
+        )
+    }
+
     /// This process's serial: its events carry it.
     pub fn serial(&self) -> u64 {
         self.serial

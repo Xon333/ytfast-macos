@@ -39,7 +39,7 @@ async fn native_audio_transport() {
         1024 * 1024
     );
     let file = path.to_str().unwrap();
-    player.load(file, "replace", &[]).await.unwrap();
+    let current_entry = player.load(file, "replace", &[]).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(player.get("time-pos").await.unwrap().as_f64().unwrap() > 0.0);
     player.set("pause", json!(true)).await.unwrap();
@@ -50,6 +50,13 @@ async fn native_audio_transport() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!((player.get("time-pos").await.unwrap().as_f64().unwrap() - 1.5).abs() < 0.3);
+    // Account checking must retire upcoming audio while preserving the exact
+    // loaded current file and its pause state.
+    player.load(file, "append", &[]).await.unwrap();
+    player.command(json!(["playlist-clear"])).await.unwrap();
+    assert_eq!(player.get("playlist-count").await.unwrap(), 1);
+    assert_eq!(player.get("playlist/0/id").await.unwrap(), current_entry);
+    assert_eq!(player.get("pause").await.unwrap(), true);
     player.load(file, "append", &[]).await.unwrap();
     player.load(file, "append", &[]).await.unwrap();
     // Absolute Next is idempotent if natural advance already selected the

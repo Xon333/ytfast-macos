@@ -84,6 +84,9 @@ impl super::Worker {
 
     /// Fetches a song's player response unless it is known.
     pub(super) fn fetch_player(&mut self, video_id: &str) {
+        if self.account_checking {
+            return;
+        }
         if self.players.contains_key(video_id) {
             return;
         }

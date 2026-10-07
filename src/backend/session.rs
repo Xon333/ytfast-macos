@@ -24,7 +24,7 @@ impl Drop for CookieFile {
 }
 
 impl super::Worker {
-    pub(super) fn connect(&mut self) {
+    pub(super) async fn connect(&mut self) {
         self.last_connect = Some(Instant::now());
         self.connect_epoch = self.connect_epoch.wrapping_add(1);
         let epoch = self.connect_epoch;
@@ -35,6 +35,7 @@ impl super::Worker {
         // audio can continue while the selected browser is checked.
         self.client.set_session(None);
         self.sink.send(Event::Account(Account::Checking));
+        self.begin_account_check().await;
         let client = self.client.snapshot();
         let paths = self.paths.clone();
         let tx = self.internal_tx.clone();
@@ -158,18 +159,22 @@ impl super::Worker {
             list: connection.profiles,
             current: connection.current,
         });
+        self.account_checking = false;
         self.sink.send(Event::Account(connection.account));
         self.prepare_restored();
+        if self.client.signed_in() && self.current_entry.is_some() && !self.idle {
+            self.prefetch();
+        }
     }
 
-    pub(super) fn auth_failed(&mut self, epoch: u64) {
+    pub(super) async fn auth_failed(&mut self, epoch: u64) {
         if epoch == self.client.session_epoch()
             && self.client.signed_in()
             && self
                 .last_connect
                 .is_none_or(|t| t.elapsed() > Duration::from_secs(60))
         {
-            self.connect();
+            self.connect().await;
         }
     }
 }
@@ -200,6 +205,7 @@ mod tests {
         let resolver = Arc::new(Resolver::new(paths.runtime.clone()));
         let mut worker = Worker::new(client.clone(), resolver, paths, sink);
         worker.connect_epoch = 2;
+        worker.account_checking = true;
         let result = |epoch, reason: &str| Connection {
             epoch,
             account: Account::SignedOut {
@@ -211,9 +217,17 @@ mod tests {
         };
         let before = client.session_epoch();
         worker.connected(result(1, "stale")).await;
+        assert!(
+            worker.account_checking,
+            "stale result must not release the latest connection barrier"
+        );
         assert!(events.try_recv().is_err());
         assert_eq!(client.session_epoch(), before);
         worker.connected(result(2, "selected")).await;
+        assert!(
+            !worker.account_checking,
+            "the latest failure must release Checking as well as success"
+        );
         assert!(
             matches!(events.recv().unwrap(), Event::Profiles { current: Some(current), .. } if current == "selected")
         );

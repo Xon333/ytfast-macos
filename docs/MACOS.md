@@ -34,7 +34,7 @@ The optional `desktop-ui` target is separate from the Mac package. Retaining its
 
 On selection, the current stream lookup, next-track lookup and mpv startup can proceed concurrently. Loudness/history metadata is fetched separately and does not gate stream readiness. A quick skip shares an existing next-track lookup.
 
-Pause cancels a pending start while preserving its selected track and seek position. Playback, queue and account generations reject obsolete completions; actual mpv events determine loading, seeking and playing state. An account change cancels account-derived preparation while already playing audio can continue.
+Pause cancels a pending start while preserving its selected track and seek position. Playback, queue and account generations reject obsolete completions; actual mpv events determine loading, seeking and playing state. Account verification cancels pending starts and queued successors and blocks fresh playback until the connection is accepted. Already-loaded audio keeps its pause, seek and volume controls.
 
 The native path prepares the current and next track. It does not resolve visible library rows or fetch unused watch-next metadata. A saved queue is restored paused without starting mpv, yt-dlp or Deno.
 

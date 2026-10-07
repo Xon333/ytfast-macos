@@ -58,7 +58,7 @@ func selfTest() {
     precondition(panel.table.numberOfRows == 1000)
     var liveRows = 0
     panel.table.enumerateAvailableRowViews { _, _ in liveRows += 1 }
-    precondition(liveRows < 40, "AppKit should instantiate visible cells only")
+    precondition(liveRows > 0 && liveRows < 40, "AppKit must render visible cells without instantiating the entire library")
     panel.table.selectRowIndexes(IndexSet(integer: 500), byExtendingSelection: false)
     api.state.pages![0].loading = true; controller.refresh()
     precondition(panel.table.numberOfRows == 1000 && panel.table.selectedRow == 500, "refresh retains rows and selection")
@@ -86,6 +86,7 @@ func selfTest() {
     precondition(panel.reconnectButton.isEnabled)
     api.state.account_checking = true; controller.refresh()
     precondition(!panel.reconnectButton.isEnabled && panel.reconnectButton.title == "Connecting…")
+    precondition(!panel.nextButton.isEnabled && !panel.previousButton.isEnabled)
 
     // Artifact screenshots are deliberately synthetic and only written on CI.
     if ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] == "true",
@@ -108,7 +109,7 @@ func selfTest() {
         capture("player-light.png", appearance: .aqua)
     }
     panel.closed(); window.orderOut(nil)
-    let result: [String: Any] = ["result": "pass", "checks": ["prelaunch_wake", "one_status_item", "native_popover", "shuffle", "seek", "editable_only", "captured_song", "1000_scrollable_rows", "visible_cell_reuse", "refresh_preserves_content", "loading_can_pause", "search_dedup", "stale_result_navigation", "signed_out_gating", "actionable_signin", "reconnect_progress"], "render_1000_rows_ms": renderMilliseconds, "instantiated_rows": liveRows]
+    let result: [String: Any] = ["result": "pass", "checks": ["prelaunch_wake", "one_status_item", "native_popover", "shuffle", "seek", "editable_only", "captured_song", "1000_scrollable_rows", "visible_cell_reuse", "refresh_preserves_content", "loading_can_pause", "search_dedup", "stale_result_navigation", "signed_out_gating", "actionable_signin", "reconnect_progress", "connecting_transport_gating"], "render_1000_rows_ms": renderMilliseconds, "instantiated_rows": liveRows]
     print(String(decoding: try! JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]), as: UTF8.self))
     NSStatusBar.system.removeStatusItem(controller.status)
 }
