@@ -15,40 +15,85 @@ pub(super) fn settings(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Ac
     egui::Popup::menu(&response).width(320.0).show(|ui| {
         ui.set_min_width(300.0);
         label(ui, "Audio quality", 12.0, Weight::SemiBold, p.secondary);
-        let format = app.playback.format.clone().unwrap_or_else(|| "Nothing playing".into());
+        let format = app
+            .playback
+            .format
+            .clone()
+            .unwrap_or_else(|| "Nothing playing".into());
         label(ui, format, 14.0, Weight::Regular, p.text);
         ui.add_space(8.0);
         let mut autoplay = app.playback.autoplay;
-        if ui.checkbox(&mut autoplay, "Autoplay similar songs when the queue ends").changed() {
+        if ui
+            .checkbox(&mut autoplay, "Autoplay similar songs when the queue ends")
+            .changed()
+        {
             actions.push(Action::Command(Command::Autoplay(autoplay)));
         }
-        let mut notifications = app.desktop.notifications.load(std::sync::atomic::Ordering::Relaxed);
-        let response = ui.add_enabled(cfg!(target_os = "linux"), egui::Checkbox::new(
-            &mut notifications, "Show a notification when the song changes"))
+        let mut notifications = app
+            .desktop
+            .notifications
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let response = ui
+            .add_enabled(
+                cfg!(target_os = "linux"),
+                egui::Checkbox::new(
+                    &mut notifications,
+                    "Show a notification when the song changes",
+                ),
+            )
             .on_disabled_hover_text("Song notifications are not available in this macOS port");
         #[cfg(feature = "e2e")]
         crate::e2e::register(&response.ctx, "Song notifications", response.interact_rect);
-        if response.changed() { actions.push(Action::Notifications(notifications)); }
+        if response.changed() {
+            actions.push(Action::Notifications(notifications));
+        }
         let mut normalize = app.playback.normalize;
-        if named_as(ui.checkbox(&mut normalize, "Even out loudness between songs"),
-            egui::WidgetType::Checkbox, "Even out loudness between songs").changed() {
+        if named_as(
+            ui.checkbox(&mut normalize, "Even out loudness between songs"),
+            egui::WidgetType::Checkbox,
+            "Even out loudness between songs",
+        )
+        .changed()
+        {
             actions.push(Action::Command(Command::Normalize(normalize)));
         }
         if let (true, Some(gain)) = (app.playback.normalize, app.playback.gain) {
-            label(ui, format!("This song plays at {gain:+.1} dB"), 12.0, Weight::Regular, p.dim);
+            label(
+                ui,
+                format!("This song plays at {gain:+.1} dB"),
+                12.0,
+                Weight::Regular,
+                p.dim,
+            );
         }
         let mut mixes = app.playback.mixes;
-        if named_as(ui.checkbox(&mut mixes.on, "Blend songs on radios and mixes"),
-            egui::WidgetType::Checkbox, "Blend songs on radios and mixes")
-            .on_hover_text("Albums and playlists stay gapless").changed() {
+        if named_as(
+            ui.checkbox(&mut mixes.on, "Blend songs on radios and mixes"),
+            egui::WidgetType::Checkbox,
+            "Blend songs on radios and mixes",
+        )
+        .on_hover_text("Albums and playlists stay gapless")
+        .changed()
+        {
             actions.push(Action::Command(Command::Mixes(mixes)));
         }
-        if mixes.on && ui.add(egui::Slider::new(&mut mixes.seconds, Mixes::SHORTEST..=Mixes::LONGEST)
-            .suffix(" s").text("Blend length")).changed() {
+        if mixes.on
+            && ui
+                .add(
+                    egui::Slider::new(&mut mixes.seconds, Mixes::SHORTEST..=Mixes::LONGEST)
+                        .suffix(" s")
+                        .text("Blend length"),
+                )
+                .changed()
+        {
             actions.push(Action::Command(Command::Mixes(mixes)));
         }
         let equalizer = &app.playback.equalizer;
-        let status = if equalizer.enabled { equalizer.preset.label() } else { "Off" };
+        let status = if equalizer.enabled {
+            equalizer.preset.label()
+        } else {
+            "Off"
+        };
         if named(ui.button(format!("Equalizer · {status}")), "Open equalizer").clicked() {
             actions.push(Action::ShowEqualizer(true));
         }
@@ -56,7 +101,9 @@ pub(super) fn settings(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Ac
         let response = ui.checkbox(&mut paint, "Paint covers in theme colours");
         #[cfg(feature = "e2e")]
         crate::e2e::register(&response.ctx, "Paint covers", response.interact_rect);
-        if response.changed() { actions.push(Action::PaintCovers(paint)); }
+        if response.changed() {
+            actions.push(Action::PaintCovers(paint));
+        }
         ui.add_space(8.0);
         label(ui, "Account", 12.0, Weight::SemiBold, p.secondary);
         let status = match &app.account {
@@ -64,14 +111,27 @@ pub(super) fn settings(app: &App, ui: &mut Ui, p: &Palette, actions: &mut Vec<Ac
             Account::Checking => "Checking…".into(),
             Account::SignedOut { reason } | Account::Unverified { reason } => reason.clone(),
         };
-        ui.add(egui::Label::new(RichText::new(status).font(font(Weight::Regular, 13.0)).color(p.text)).wrap());
+        ui.add(
+            egui::Label::new(
+                RichText::new(status)
+                    .font(font(Weight::Regular, 13.0))
+                    .color(p.text),
+            )
+            .wrap(),
+        );
         if ui.button("Reconnect to the browser's session").clicked() {
             actions.push(Action::Command(Command::Reconnect));
         }
         // Also show the single remaining profile when a saved selection was removed.
         if !app.profiles.is_empty() {
             ui.add_space(8.0);
-            label(ui, "Use the YouTube account signed in to", 12.0, Weight::SemiBold, p.secondary);
+            label(
+                ui,
+                "Use the YouTube account signed in to",
+                12.0,
+                Weight::SemiBold,
+                p.secondary,
+            );
             for profile in &app.profiles {
                 let current = app.profile.as_deref() == Some(profile.id.as_str());
                 if ui.radio(current, profile.label.as_str()).clicked() && !current {
