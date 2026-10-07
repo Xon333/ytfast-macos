@@ -67,8 +67,6 @@ Outputs are `dist/YTfast.app` and `dist/ytfast-macos-<arch>.zip`. The optional `
 - [Contributor guidance](AGENTS.md)
 - [Inherited desktop specification](docs/SPEC.md) and [dated integration research](docs/integration.md)
 
-Current source, observed behavior and user direction take precedence over inherited implementation assumptions.
-
 ## Credits
 
 Fork of [MayberryDT/ytfast](https://github.com/MayberryDT/ytfast), by Tyler Mayberry.
