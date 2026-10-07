@@ -90,25 +90,122 @@ fn database_filters_cookie_domains_on_label_boundaries() {
 
 #[test]
 fn selected_profile_never_falls_back_to_a_different_account() {
+    let directory = std::env::temp_dir().join(format!("ytfast-auth-{:032x}", fastrand::u128(..)));
+    crate::paths::private_dir(&directory).unwrap();
+    let path = directory.join("Cookies");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE meta (key TEXT, value TEXT);
+        INSERT INTO meta VALUES ('version', '24');
+        CREATE TABLE cookies (host_key TEXT, name TEXT, value TEXT, encrypted_value BLOB,
+                              path TEXT, expires_utc INTEGER, is_secure INTEGER);
+        INSERT INTO cookies VALUES ('.youtube.com', 'SAPISID', 'synthetic', x'', '/', 0, 1);",
+    )
+    .unwrap();
+    drop(db);
     let candidate = || Candidate {
         browser: &BROWSERS[0],
         profile: "Default".into(),
-        cookies: PathBuf::from("not-opened"),
+        cookies: path.clone(),
         modified: SystemTime::UNIX_EPOCH,
     };
     let id = candidate().id();
-    let mut list = vec![candidate()];
-    select_preferred(&mut list, Some("removed/profile")).unwrap_err();
-    let mut list = vec![
-        candidate(),
-        Candidate {
-            profile: "Profile 1".into(),
-            ..candidate()
-        },
-    ];
-    select_preferred(&mut list, Some(&id)).unwrap();
-    assert_eq!(list.len(), 1);
-    assert_eq!(list[0].id(), id);
+    let (missing, profiles) = load_candidates(vec![candidate()], Some("removed/profile"));
+    assert!(missing.unwrap_err().to_string().contains("unavailable"));
+    assert_eq!(profiles[0].id, id);
+    let unavailable = Candidate {
+        profile: "Profile 1".into(),
+        cookies: directory.join("Unavailable"),
+        ..candidate()
+    };
+    let preferred = unavailable.id();
+    let (denied, _) = load_candidates(vec![candidate(), unavailable], Some(&preferred));
+    assert!(denied.unwrap_err().to_string().contains("Profile 1"));
+    let (selected, _) = load_candidates(
+        vec![
+            candidate(),
+            Candidate {
+                profile: "Profile 1".into(),
+                ..candidate()
+            },
+        ],
+        Some(&id),
+    );
+    assert_eq!(selected.unwrap().profile, id);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+fn synthetic_session(profile: &str, identity: &str) -> Session {
+    Session {
+        source: "synthetic".into(),
+        profile: profile.into(),
+        cookies: vec![Cookie {
+            host: ".youtube.com".into(),
+            name: "SAPISID".into(),
+            value: identity.into(),
+            path: "/".into(),
+            secure: true,
+            expires: 0,
+        }],
+    }
+}
+
+#[test]
+fn cookie_header_and_authorization_use_the_same_specific_identity() {
+    let mut session = synthetic_session("profile", "broad");
+    let mut specific = session.cookies[0].clone();
+    specific.host = "music.youtube.com".into();
+    specific.value = "specific".into();
+    session.cookies.push(specific);
+    let mut duplicate = session.cookies[1].clone();
+    duplicate.host = ".music.youtube.com".into();
+    duplicate.value = "equal-specificity".into();
+    session.cookies.push(duplicate);
+    assert_eq!(session.header(), "SAPISID=specific");
+    assert_eq!(session.sapisid(), Some("specific"));
+}
+
+#[test]
+fn cache_scope_separates_accounts_and_ignores_cookie_order() {
+    let mut first = synthetic_session("browser/Default", "account-a");
+    let mut extra = first.cookies[0].clone();
+    extra.name = "SID".into();
+    extra.value = "second-auth-cookie".into();
+    first.cookies.push(extra);
+    let scope = first.cache_scope();
+    first.cookies.reverse();
+    assert_eq!(scope, first.cache_scope());
+    first.cookies[0].value = "different-auth-cookie".into();
+    assert_ne!(scope, first.cache_scope());
+    assert_ne!(
+        synthetic_session("browser/Default", "account-a").cache_scope(),
+        synthetic_session("browser/Default", "account-b").cache_scope()
+    );
+    assert_ne!(
+        synthetic_session("browser/Default", "account-a").cache_scope(),
+        synthetic_session("browser/Profile 1", "account-a").cache_scope()
+    );
+    assert_eq!(scope.len(), 64);
+    assert!(scope.bytes().all(|byte| byte.is_ascii_hexdigit()));
+}
+
+#[test]
+fn queued_operations_keep_their_account_and_stale_replies_are_dropped() {
+    let current = crate::innertube::Client::new();
+    current.set_session(Some(synthetic_session("profile", "account-a")));
+    let queued = current.snapshot();
+    let previous_scope = queued.cache_scope();
+    let previous_epoch = queued.session_epoch();
+    current.set_session(None);
+    current.set_session(Some(synthetic_session("profile", "account-b")));
+    assert_eq!(queued.cache_scope(), previous_scope);
+    assert_ne!(queued.cache_scope(), current.cache_scope());
+    current.if_current(previous_epoch, || {
+        panic!("A stale account reply was published")
+    });
+    let mut accepted = false;
+    current.if_current(current.session_epoch(), || accepted = true);
+    assert!(accepted);
 }
 
 #[test]

@@ -21,10 +21,19 @@ pub(super) struct Write {
     op: u64,
     edit: Edit,
     refresh: Vec<Target>,
+    session: Client,
 }
 
 impl super::Worker {
     pub(super) fn account_edit(&mut self, op: u64, edit: Edit, refresh: Vec<Target>) {
+        let session = self.client.snapshot();
+        if !session.signed_in() {
+            self.sink.send(Event::AccountEdited {
+                op,
+                result: Err(Failure::SignedOut),
+            });
+            return;
+        }
         let writes = self.account_writes.get_or_insert_with(|| {
             let (tx, rx) = mpsc::unbounded_channel();
             tokio::spawn(writer(
@@ -35,17 +44,28 @@ impl super::Worker {
             ));
             tx
         });
-        let _ = writes.send(Write { op, edit, refresh });
+        let _ = writes.send(Write {
+            op,
+            edit,
+            refresh,
+            session,
+        });
     }
 
     /// The account's rating of a song, fetched fresh.
     pub(super) fn like_status(&self, video_id: String) {
-        let client = self.client.clone();
+        let current = self.client.clone();
+        let client = current.snapshot();
+        let epoch = client.session_epoch();
         let sink = self.sink.clone();
+        let internal = self.internal_tx.clone();
         tokio::spawn(async move {
             match client.like_status(&video_id).await {
-                Ok(Some(like)) => sink.send(Event::Likes(vec![like])),
+                Ok(Some(like)) => current.if_current(epoch, || sink.send(Event::Likes(vec![like]))),
                 Ok(None) => log::warn!("no rating in watch-next for {video_id}"),
+                Err(ApiError::Auth) => {
+                    let _ = internal.send(Internal::AuthFailed(epoch));
+                }
                 Err(error) => log::warn!("rating of {video_id}: {error}"),
             }
         });
@@ -54,18 +74,27 @@ impl super::Worker {
 
 /// Makes the account writes one after another.
 async fn writer(
-    client: Arc<Client>,
+    current: Arc<Client>,
     sink: Sink,
     internal: mpsc::UnboundedSender<Internal>,
     mut writes: mpsc::UnboundedReceiver<Write>,
 ) {
-    while let Some(Write { op, edit, refresh }) = writes.recv().await {
+    while let Some(Write {
+        op,
+        edit,
+        refresh,
+        session,
+    }) = writes.recv().await
+    {
+        let epoch = session.session_epoch();
+        if current.session_epoch() != epoch {
+            continue;
+        }
         let started = Instant::now();
-        let what = format!("{edit:?}");
-        let result = match run(&client, edit).await {
+        let result = match run(&session, edit).await {
             Ok(done) => Ok(done),
             Err(Answer::Api(ApiError::Auth)) => {
-                let _ = internal.send(Internal::AuthFailed);
+                let _ = internal.send(Internal::AuthFailed(epoch));
                 Err(Failure::SignedOut)
             }
             Err(Answer::Api(ApiError::Offline(_))) => Err(Failure::Offline),
@@ -76,7 +105,7 @@ async fn writer(
             Err(Answer::Refused(message)) => Err(Failure::Refused(message)),
         };
         log::info!(
-            "account write {op} {what}: {} after {:.2}s",
+            "account write {op}: {} after {:.2}s",
             match &result {
                 Ok(_) => "accepted".to_owned(),
                 Err(failure) => format!("{failure:?}"),
@@ -84,14 +113,15 @@ async fn writer(
             started.elapsed().as_secs_f64()
         );
         let ok = result.is_ok();
-        sink.send(Event::AccountEdited { op, result });
+        current.if_current(epoch, || sink.send(Event::AccountEdited { op, result }));
         // The refetch waits for YouTube Music to list the change; the next
         // write doesn't wait for it.
         if ok && !refresh.is_empty() {
             let sink = sink.clone();
+            let current = current.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(SETTLE).await;
-                sink.send(Event::AccountRefresh(refresh));
+                current.if_current(epoch, || sink.send(Event::AccountRefresh(refresh)));
             });
         }
     }

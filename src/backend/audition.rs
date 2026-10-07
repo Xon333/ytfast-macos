@@ -58,6 +58,9 @@ impl super::Worker {
     /// Holds `track`: it plays from `start` seconds in (a third of the way
     /// when `None`) over the ducked current song.
     pub(super) async fn audition(&mut self, track: Track, start: Option<f64>) {
+        if !self.fresh_playback_allowed() {
+            return;
+        }
         let video_id = track.video_id;
         let a = &mut self.decks.audition;
         if a.held.as_ref().is_some_and(|(id, _)| *id == video_id) {
@@ -193,7 +196,7 @@ impl super::Worker {
                     a.started = true;
                 }
             }
-            MpvEvent::Property { name, data } if name == "time-pos" => {
+            MpvEvent::Property { name, data, .. } if name == "time-pos" => {
                 // Audio is coming: fade in over the ducking current song.
                 if a.started && a.held.is_some() && data.as_f64().is_some() {
                     a.started = false;
@@ -222,7 +225,7 @@ impl super::Worker {
                     self.end_audition().await;
                 }
             }
-            MpvEvent::Property { .. } => {}
+            MpvEvent::Property { .. } | MpvEvent::PlaybackRestart { .. } => {}
         }
     }
 

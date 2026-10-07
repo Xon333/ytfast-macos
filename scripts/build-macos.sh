@@ -23,7 +23,7 @@ trap 'rm -rf "$staging"' EXIT
 app="$staging/YTfast.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 swiftc -swift-version 5 -O -whole-module-optimization \
-  -target "$arch-apple-macosx13.0" -import-objc-header native/Bridge.h native/main.swift \
+  -target "$arch-apple-macosx13.0" -import-objc-header native/Bridge.h native/*.swift \
   "$target_dir/$target/release/libytfast.a" -o "$app/Contents/MacOS/ytfast" \
   -framework AppKit -framework MediaPlayer -framework Security \
   -framework SystemConfiguration -framework CoreFoundation -lc++ -lresolv -liconv \
@@ -32,6 +32,9 @@ chmod 755 "$app/Contents/MacOS/ytfast"
 install -m 644 LICENSE "$app/Contents/Resources/LICENSE"
 install -m 644 assets/icons/LICENSE.txt "$app/Contents/Resources/Lucide-LICENSE.txt"
 version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -1)"
+revision="$(git rev-parse HEAD)"
+if ! git diff --quiet HEAD --; then revision="$revision-dirty"; fi
+printf '%s\n' "$revision" > "$app/Contents/Resources/source-revision.txt"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -43,6 +46,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleVersion</key><string>$version</string>
 <key>CFBundleShortVersionString</key><string>$version</string>
+<key>YTfastSourceRevision</key><string>$revision</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>LSUIElement</key><true/>

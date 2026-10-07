@@ -110,9 +110,58 @@ impl Session {
         ["SAPISID", "__Secure-3PAPISID"].iter().find_map(|name| {
             self.cookies
                 .iter()
-                .find(|c| c.name == *name && applies_to_music(&c.host))
+                .filter(|c| c.name == *name && applies_to_music(&c.host))
+                .reduce(|current, candidate| {
+                    if specificity(&candidate.host) > specificity(&current.host) {
+                        candidate
+                    } else {
+                        current
+                    }
+                })
                 .map(|c| c.value.as_str())
         })
+    }
+
+    /// A cache namespace for this browser account session. Only the digest
+    /// is retained with page/stream caches; credentials never enter filenames.
+    /// A different account in the same browser profile has different cookies.
+    pub fn cache_scope(&self) -> String {
+        let mut cookies: Vec<_> = self
+            .cookies
+            .iter()
+            .filter(|cookie| {
+                applies_to_music(&cookie.host)
+                    && matches!(
+                        cookie.name.as_str(),
+                        "SAPISID"
+                            | "__Secure-3PAPISID"
+                            | "__Secure-1PAPISID"
+                            | "SID"
+                            | "HSID"
+                            | "SSID"
+                            | "APISID"
+                            | "__Secure-1PSID"
+                            | "__Secure-3PSID"
+                            | "LOGIN_INFO"
+                    )
+            })
+            .collect();
+        cookies.sort_by(|a, b| {
+            (&a.host, &a.name, &a.path, &a.value).cmp(&(&b.host, &b.name, &b.path, &b.value))
+        });
+        let mut hash = sha2::Sha256::new();
+        for field in std::iter::once(self.profile.as_str()).chain(cookies.iter().flat_map(|c| {
+            [
+                c.host.as_str(),
+                c.name.as_str(),
+                c.path.as_str(),
+                c.value.as_str(),
+            ]
+        })) {
+            hash.update((field.len() as u64).to_le_bytes());
+            hash.update(field.as_bytes());
+        }
+        hash.finalize().iter().map(|b| format!("{b:02x}")).collect()
     }
 
     /// Atomic 0600 export containing only YouTube/Google cookies.
@@ -176,11 +225,21 @@ pub struct Profile {
     pub label: String,
 }
 
-fn cookie_path(profile: &Path) -> Option<PathBuf> {
-    ["Network/Cookies", "Cookies"]
-        .iter()
-        .map(|p| profile.join(p))
-        .find(|p| p.is_file())
+fn cookie_path(profile: &Path) -> std::io::Result<Option<PathBuf>> {
+    for relative in ["Network/Cookies", "Cookies"] {
+        let path = profile.join(relative);
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => return Ok(Some(path)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
 }
 
 fn candidates() -> Result<Vec<Candidate>> {
@@ -190,13 +249,23 @@ fn candidates() -> Result<Vec<Candidate>> {
     #[cfg(target_os = "linux")]
     let config = base.config_dir().to_path_buf();
     let mut candidates = Vec::new();
+    let mut denied = false;
     for browser in BROWSERS {
-        let Ok(entries) = std::fs::read_dir(config.join(browser.dir)) else {
-            continue;
+        let entries = match std::fs::read_dir(config.join(browser.dir)) {
+            Ok(entries) => entries,
+            Err(error) => {
+                denied |= error.kind() == std::io::ErrorKind::PermissionDenied;
+                continue;
+            }
         };
         for entry in entries.flatten() {
-            let Some(cookies) = cookie_path(&entry.path()) else {
-                continue;
+            let cookies = match cookie_path(&entry.path()) {
+                Ok(Some(cookies)) => cookies,
+                Ok(None) => continue,
+                Err(error) => {
+                    denied |= error.kind() == std::io::ErrorKind::PermissionDenied;
+                    continue;
+                }
             };
             let modified = [&cookies, &cookies.with_file_name("Cookies-wal")]
                 .iter()
@@ -211,47 +280,71 @@ fn candidates() -> Result<Vec<Candidate>> {
             });
         }
     }
+    if candidates.is_empty() && denied {
+        #[cfg(target_os = "macos")]
+        bail!(
+            "Allow YTfast in System Settings → Privacy & Security → Full Disk Access, then quit and reopen YTfast"
+        );
+        #[cfg(target_os = "linux")]
+        bail!(
+            "The browser profiles could not be read. Check their file permissions, then Reconnect"
+        );
+    }
     candidates.sort_by_key(|c| std::cmp::Reverse(c.modified));
     Ok(candidates)
 }
 
-pub fn profiles(_scratch: &Path) -> Vec<Profile> {
-    candidates()
-        .unwrap_or_default()
-        .iter()
-        .filter(|c| snapshot(c).is_ok_and(|(_, rows)| has_signin(&rows)))
-        .map(|c| Profile {
-            id: c.id(),
-            label: c.label(),
-        })
-        .collect()
-}
-
-fn select_preferred(candidates: &mut Vec<Candidate>, preferred: Option<&str>) -> Result<()> {
-    if let Some(id) = preferred {
-        if !candidates.iter().any(|c| c.id() == id) {
-            bail!("The selected browser profile was removed. Choose another in Settings");
+/// Discover profiles and read the selected session from one set of SQLite
+/// snapshots. Discovery never unlocks another browser's Keychain item.
+pub fn load_with_profiles(preferred: Option<&str>) -> (Result<Session>, Vec<Profile>) {
+    let candidates = match candidates() {
+        Ok(candidates) if !candidates.is_empty() => candidates,
+        Ok(_) => {
+            return (
+                Err(anyhow!(
+                    "Sign in to YouTube Music in Chrome, Brave or Chromium, then Reconnect"
+                )),
+                Vec::new(),
+            );
         }
-        candidates.retain(|c| c.id() == id);
-    }
-    Ok(())
+        Err(error) => return (Err(error), Vec::new()),
+    };
+    load_candidates(candidates, preferred)
 }
 
-pub fn load(_scratch: &Path, preferred: Option<&str>) -> Result<Session> {
-    let mut candidates = candidates()?;
-    if candidates.is_empty() {
-        bail!("Sign in to YouTube Music in Chrome, Brave or Chromium, then Reconnect");
-    }
-    select_preferred(&mut candidates, preferred)?;
+fn load_candidates(
+    candidates: Vec<Candidate>,
+    preferred: Option<&str>,
+) -> (Result<Session>, Vec<Profile>) {
+    let selected_exists = preferred.is_none_or(|id| candidates.iter().any(|c| c.id() == id));
+    let mut profiles = Vec::new();
+    let mut session = None;
     for candidate in &candidates {
-        // A denied key or failed selected profile must not select a different account.
-        if let Some(session) = read_profile(candidate)? {
-            return Ok(session);
+        let rows = snapshot(candidate);
+        if rows.as_ref().is_ok_and(|(_, rows)| has_signin(rows)) {
+            profiles.push(Profile {
+                id: candidate.id(),
+                label: candidate.label(),
+            });
+        }
+        if session.is_some() || preferred.is_some_and(|id| candidate.id() != id) {
+            continue;
+        }
+        // Stop on the first selected/readable sign-in source or error. A
+        // denied key must never silently choose another account.
+        match rows.and_then(|(version, rows)| read_profile(candidate, version, rows)) {
+            Ok(None) => {}
+            result => session = Some(result.map(|session| session.expect("selected session"))),
         }
     }
-    Err(anyhow!(
-        "No available browser profile has a current YouTube sign-in. Sign in, then Reconnect"
-    ))
+    let session = session.unwrap_or_else(|| {
+        Err(if selected_exists {
+            anyhow!("No current YouTube sign-in in this browser profile. Sign in, then Reconnect")
+        } else {
+            anyhow!("The selected browser profile is unavailable. Choose another in Account")
+        })
+    });
+    (session, profiles)
 }
 
 type Row = (String, String, String, Vec<u8>, String, i64, bool);
@@ -261,7 +354,7 @@ fn snapshot(candidate: &Candidate) -> Result<(i64, Vec<Row>)> {
         &candidate.cookies,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
-    .context("The browser cookie store could not be opened read-only")?;
+    .with_context(|| cookie_access_message(candidate))?;
     db.busy_timeout(Duration::from_secs(2))?;
     // SQLite reads the live database and WAL as one snapshot; copying them
     // separately can combine different browser transactions.
@@ -311,8 +404,17 @@ fn has_signin(rows: &[Row]) -> bool {
         .any(|r| applies_to_music(&r.0) && matches!(r.1.as_str(), "SAPISID" | "__Secure-3PAPISID"))
 }
 
-fn read_profile(candidate: &Candidate) -> Result<Option<Session>> {
-    let (version, rows) = snapshot(candidate)?;
+fn cookie_access_message(candidate: &Candidate) -> String {
+    #[cfg(target_os = "macos")]
+    return format!(
+        "Can't read {} cookies. Allow YTfast in System Settings → Privacy & Security → Full Disk Access, then quit and reopen YTfast",
+        candidate.label()
+    );
+    #[cfg(target_os = "linux")]
+    format!("Can't read {} cookies", candidate.label())
+}
+
+fn read_profile(candidate: &Candidate, version: i64, rows: Vec<Row>) -> Result<Option<Session>> {
     if !has_signin(&rows) {
         return Ok(None);
     }

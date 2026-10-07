@@ -451,6 +451,12 @@ impl super::Worker {
         let _ = cued.mpv.set("pause", json!(false)).await;
         let entry = cued.next.entry;
         self.advanced(cued.next).await;
+        // This deck was already decoded and waiting paused before the swap.
+        // Resuming it need not emit another playback-restart event.
+        self.starting = false;
+        self.buffering = false;
+        self.seeking = false;
+        self.update_transport();
         // The cued file's length arrived while it waited; ask for it again.
         if self.current_entry == Some(entry)
             && let Ok(duration) = cued.mpv.get("duration").await

@@ -25,7 +25,7 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir -p "$repo/artifacts/native"
-"$binary" --self-test > "$repo/artifacts/native/menu-tests.json"
+YTFAST_UI_CAPTURE_DIR="$repo/artifacts/native" "$binary" --self-test > "$repo/artifacts/native/menu-tests.json"
 export HOME="$home" PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export YTFAST_PROFILE_FILE="$repo/artifacts/native/idle-memory.json"
 # Show starts the app when none exists; do not invoke it as a presence probe.

@@ -15,8 +15,9 @@ use crate::model::SleepTimer;
 
 /// The level songs are evened out to, in LKFS.
 const TARGET_LKFS: f64 = -14.0;
-/// Quiet songs are raised at most this much, to stay clear of clipping.
-const MAX_BOOST_DB: f64 = 3.0;
+/// YouTube's integrated loudness does not establish peak headroom. Without
+/// peak data, attenuation is safe; boosting quiet tracks can clip their peaks.
+const MAX_BOOST_DB: f64 = 0.0;
 /// The sleep timer fades out over its last seconds.
 const FADE_SECONDS: f64 = 8.0;
 
@@ -82,25 +83,50 @@ impl super::Worker {
     }
 
     /// Fetches a song's player response unless it is known.
-    pub(super) fn fetch_player(&self, video_id: &str) {
+    pub(super) fn fetch_player(&mut self, video_id: &str) {
+        if self.account_checking {
+            return;
+        }
         if self.players.contains_key(video_id) {
             return;
         }
-        let client = self.client.clone();
+        if let Some((epoch, task)) = self.player_requests.get(video_id) {
+            if *epoch == self.client.session_epoch() && !task.is_finished() {
+                return;
+            }
+            task.abort();
+            self.player_requests.remove(video_id);
+        }
+        let current = self.client.clone();
+        let client = Arc::new(current.snapshot());
+        let epoch = client.session_epoch();
         let tx = self.internal_tx.clone();
         let video_id = video_id.to_owned();
-        tokio::spawn(async move {
-            match client.player(&video_id).await {
-                Ok(value) => {
-                    let info = player_info(&value);
-                    let _ = tx.send(Internal::Player { video_id, info });
-                }
-                Err(ApiError::Auth) => {
-                    let _ = tx.send(Internal::AuthFailed);
-                }
-                Err(error) => log::debug!("no player response for {video_id}: {error}"),
+        let id = video_id.clone();
+        let task = tokio::spawn(async move {
+            let result = client.player(&video_id).await;
+            if current.session_epoch() != epoch {
+                return;
             }
+            let info = match result {
+                Ok(value) => Some(player_info(&value)),
+                Err(ApiError::Auth) => {
+                    let _ = tx.send(Internal::AuthFailed(epoch));
+                    None
+                }
+                Err(error) => {
+                    log::debug!("no player response for {video_id}: {error}");
+                    None
+                }
+            };
+            let _ = tx.send(Internal::Player {
+                epoch,
+                video_id,
+                info,
+            });
         });
+        self.player_requests
+            .insert(id, (epoch, task.abort_handle()));
     }
 
     pub(super) fn remember_player(&mut self, video_id: String, info: PlayerInfo) {
@@ -124,7 +150,7 @@ impl super::Worker {
     }
 
     /// Sets the current song's gain while it plays.
-    async fn apply_gain(&mut self, gain: f64) {
+    pub(super) async fn apply_gain(&mut self, gain: f64) {
         if let Some(mpv) = &self.mpv {
             let _ = mpv.set("volume-gain", json!(gain)).await;
         }
@@ -387,6 +413,9 @@ impl super::Worker {
         self.state.sleep = None;
         self.restore_fade().await;
         self.apply_loop().await;
+        self.starting = false;
+        self.buffering = false;
+        self.seeking = false;
         self.state.playing = false;
         self.state.loading = false;
         if let Some(pos) = self.pos {
@@ -488,5 +517,18 @@ impl super::Worker {
                 json!({"mpv_pause": pause, "mpv_volume": mpv_volume, "volume": volume}),
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalization_attenuates_without_inventing_peak_headroom() {
+        assert_eq!(level(-7.0), -7.0);
+        assert_eq!(level(-14.0), 0.0);
+        assert_eq!(level(-24.0), 0.0);
+        assert_eq!(level(12.0), -24.0);
     }
 }
