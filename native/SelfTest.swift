@@ -32,7 +32,8 @@ func selfTest() {
     controller.setup(); precondition(controller.status === status, "exactly one status item")
     controller.refresh()
     let panel = controller.panel!
-    let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 380, height: 560), styleMask: [.borderless], backing: .buffered, defer: false)
+    let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: PlayerPanel.width, height: 400), styleMask: [.borderless], backing: .buffered, defer: false)
+    panel.sizeChanged = { [weak window] size in window?.setContentSize(size) }
     window.contentView = panel.view; window.appearance = NSAppearance(named: .darkAqua)
     window.makeKeyAndOrderFront(nil); panel.opened(); panel.view.layoutSubtreeIfNeeded()
     precondition(controller.status.menu == nil && controller.popover.contentViewController === panel)
@@ -65,7 +66,7 @@ func selfTest() {
     api.state.pages![0].loading = false; api.state.pages![0].message = "Offline. Showing saved music."
     controller.refresh(); precondition(panel.table.numberOfRows == 1000)
     api.state.loading = true; api.state.playing = false; controller.refresh()
-    precondition(panel.playButton.isEnabled && panel.playButton.toolTip == "Pause")
+    precondition(panel.playButton.isEnabled && panel.playButton.toolTip == "Cancel loading")
     panel.playButton.performClick(nil)
     precondition(api.last("transport")?["action"] as? String == "toggle")
     api.state.loading = false
@@ -81,12 +82,74 @@ func selfTest() {
     api.state.signed_in = false; api.state.account = "Sign in to YouTube Music in your browser"
     api.state.pages = []; controller.refresh()
     precondition(panel.pages.isEmpty && panel.rows.isEmpty && !panel.search.isEnabled && !panel.addButton.isEnabled)
-    let account = panel.makeAccountMenu()
-    precondition(account.items.contains { $0.title == "Open YouTube Music to sign in" && $0.isEnabled })
+    let account = panel.makeMoreMenu()
+    precondition(account.items.contains { $0.title == "Open YouTube Music" && $0.isEnabled })
     precondition(panel.reconnectButton.isEnabled)
     api.state.account_checking = true; controller.refresh()
     precondition(!panel.reconnectButton.isEnabled && panel.reconnectButton.title == "Connecting…")
     precondition(!panel.nextButton.isEnabled && !panel.previousButton.isEnabled)
+
+    precondition(panel.profilePicker.isHidden, "a single profile is a label, not a disabled picker")
+
+    // Stable navigation and selection must survive ordinary position updates
+    // and closing/reopening. Only changed rows cause a table reload.
+    api.state.signed_in = true; api.state.account_checking = false
+    api.state.account = "Demo · Chrome"; api.state.pages = [fixture]
+    controller.refresh(); panel.navigate(.library(0), remember: false)
+    let warmReloads = panel.reloadCount
+    let warmBegan = CFAbsoluteTimeGetCurrent()
+    for _ in 0..<30 { panel.closed(); panel.opened() }
+    let warmOpenMilliseconds = (CFAbsoluteTimeGetCurrent() - warmBegan) * 1000 / 30
+    let warmReloadDelta = panel.reloadCount - warmReloads
+    precondition(warmReloadDelta == 0, "warm open must not rebuild unchanged rows")
+    api.state.pages = nil
+    for _ in 0..<100 { api.state.position += 0.25; controller.refresh() }
+    precondition(panel.reloadCount == warmReloads, "position ticks must not rebuild the library")
+
+    panel.search.stringValue = "find album"; panel.searchNow(nil)
+    let searchLocation = panel.location
+    let album = Location.from(browseTarget("MPREfixture"), title: "An album")!
+    panel.navigate(album)
+    panel.closed(); panel.opened()
+    precondition(panel.location.key == album.key, "reopening a search destination must not rerun the old query")
+    panel.back(nil)
+    precondition(panel.location.key == searchLocation.key && panel.search.stringValue == "find album", "Back restores the query")
+    precondition(panel.sections.selectedSegment == -1, "search results are not a library section")
+    panel.back(nil)
+    precondition(panel.location.key == playlistKey)
+    precondition(panel.table.action == nil, "selection and arrow keys must never dispatch playback")
+
+    // Seek and volume must resist stale backend echoes during AppKit tracking.
+    api.state.loading = false; api.state.track = Song(id: "abcdefghijk", title: "Track one", artist: "Demo")
+    controller.refresh()
+    panel.seek.beginEditing(); panel.seek.doubleValue = 100
+    api.state.position = 3; controller.refresh()
+    precondition(panel.seek.doubleValue == 100)
+    let seeksBeforeChange = api.sent.filter { $0["op"] as? String == "seek" }.count
+    api.state.track = Song(id: "lmnopqrstuv", title: "Track two", artist: "Demo"); controller.refresh()
+    panel.seek.endEditing()
+    precondition(api.sent.filter { $0["op"] as? String == "seek" }.count == seeksBeforeChange, "a drag begun on the previous song must not seek its successor")
+    panel.volume.beginEditing(); panel.volume.doubleValue = 32; panel.volumeChanged(panel.volume)
+    api.state.volume = 70; controller.refresh()
+    precondition(panel.volume.doubleValue == 32)
+    panel.volume.endEditing()
+    api.state.volume = 32; controller.refresh()
+    panel.mute(nil); precondition(api.last("volume")?["value"] as? Double == 0)
+    api.state.volume = 0; controller.refresh()
+    panel.mute(nil); precondition(api.last("volume")?["value"] as? Double == 32)
+
+    // Arrow navigation selects; Return activates, and an already-playing song
+    // uses transport instead of another YouTube queue request.
+    let songTarget = encodeTarget("Watch", ["video_id": "lmnopqrstuv", "playlist_id": NSNull(), "params": NSNull()])
+    api.state.pages = [Page(key: playlistKey, target: browseTarget(playlistID), title: "Playlists", rows: [Row(title: "Track two", subtitle: "Demo", play: songTarget, video: "lmnopqrstuv")], loading: false, more: false)]
+    controller.refresh(); panel.table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+    let playsBefore = api.sent.filter { $0["op"] as? String == "play" }.count
+    panel.activateSelectedRow()
+    precondition(api.sent.filter { $0["op"] as? String == "play" }.count == playsBefore)
+    precondition(api.last("transport")?["action"] as? String == "toggle")
+    panel.showAccount(nil); precondition(panel.showingAccount && panel.search.isHidden)
+    panel.focusSearch(); precondition(!panel.showingAccount && !panel.search.isHidden)
+    precondition(PlayerPanel.searchDelay == 0.18)
 
     // Artifact screenshots are deliberately synthetic and only written on CI.
     if ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] == "true",
@@ -100,16 +163,33 @@ func selfTest() {
             guard let data = bitmap.representation(using: .png, properties: [:]) else { preconditionFailure("native PNG unavailable") }
             try! data.write(to: URL(fileURLWithPath: directory).appendingPathComponent(name))
         }
-        api.state.account_checking = false; controller.refresh()
+        api.state.account_checking = false; api.state.signed_in = false
+        api.state.track = nil; api.state.playing = false; api.state.loading = false
+        api.state.account = "Sign in to YouTube Music in Chrome"; controller.refresh()
         capture("signed-out-dark.png", appearance: .darkAqua)
+        api.state.account_checking = true; controller.refresh()
+        capture("connecting-dark.png", appearance: .darkAqua)
+        api.state.account_checking = false; api.state.account = "Operation not permitted. Full Disk Access is required."; controller.refresh()
+        capture("permission-dark.png", appearance: .darkAqua)
         api.state.signed_in = true; api.state.account = "Demo · Chrome"; api.state.pages = [fixture]
         api.state.track = Song(id: "abcdefghijk", title: "Night Drive", artist: "YTfast demo")
-        api.state.playing = true; controller.refresh()
+        api.state.playing = true; api.state.position = 62; api.state.volume = 70
+        api.state.format = "Opus 256 kbps · Premium (itag 774)"; controller.refresh()
         capture("player-dark.png", appearance: .darkAqua)
         capture("player-light.png", appearance: .aqua)
+        api.state.profiles.append(Profile(id: "brave:Default", label: "Brave · Default")); controller.refresh()
+        panel.showAccount(nil); capture("account-dark.png", appearance: .darkAqua)
+        panel.showAccount(nil)
+        api.state.pages = [fixture, Page(key: "browse:VLPLowned:", target: browseTarget("VLPLowned"), title: "Late nights", rows: (0..<8).map { Row(title: "Song \($0 + 1)", subtitle: "Artist name", play: songTarget, video: "fixture\($0)") }, play: songTarget, loading: false, more: false)]
+        controller.refresh(); panel.navigate(Location.from(browseTarget("VLPLowned"), title: "Late nights")!)
+        capture("playlist-dark.png", appearance: .darkAqua)
+        for control in [panel.playButton, panel.previousButton, panel.nextButton, panel.shuffleButton, panel.addButton] {
+            let frame = control.convert(control.bounds, to: panel.view)
+            precondition(panel.view.bounds.contains(frame) && frame.width >= 28 && frame.height >= 28, "transport hit areas must be visible and usable")
+        }
     }
     panel.closed(); window.orderOut(nil)
-    let result: [String: Any] = ["result": "pass", "checks": ["prelaunch_wake", "one_status_item", "native_popover", "shuffle", "seek", "editable_only", "captured_song", "1000_scrollable_rows", "visible_cell_reuse", "refresh_preserves_content", "loading_can_pause", "search_dedup", "stale_result_navigation", "signed_out_gating", "actionable_signin", "reconnect_progress", "connecting_transport_gating"], "render_1000_rows_ms": renderMilliseconds, "instantiated_rows": liveRows]
+    let result: [String: Any] = ["result": "pass", "checks": ["prelaunch_wake", "one_status_item", "native_popover", "shuffle", "seek", "editable_only", "captured_song", "1000_scrollable_rows", "visible_cell_reuse", "refresh_preserves_content", "loading_can_pause", "search_dedup", "stale_result_navigation", "signed_out_gating", "actionable_signin", "reconnect_progress", "connecting_transport_gating", "single_profile_label", "warm_open_no_reload", "position_ticks_no_reload", "reopen_preserves_destination", "back_restores_search", "search_section_state", "selection_is_not_playback", "seek_tracking_stability", "seek_accounting_for_track_change", "volume_tracking_stability", "mute_restores_volume", "current_song_uses_transport", "inline_account", "search_focus_from_account", "control_hit_areas"], "warm_open_ms": warmOpenMilliseconds, "warm_open_reloads": warmReloadDelta, "render_1000_rows_ms": renderMilliseconds, "instantiated_rows": liveRows]
     print(String(decoding: try! JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]), as: UTF8.self))
     NSStatusBar.system.removeStatusItem(controller.status)
 }
