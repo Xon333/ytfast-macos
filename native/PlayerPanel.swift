@@ -61,7 +61,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
     let profilePicker = NSPopUpButton(frame: .zero, pullsDown: false)
     private let profileLabel = NSTextField(labelWithString: "")
     let reconnectButton = NSButton(title: "Connect", target: nil, action: nil)
-    let browserButton = NSButton(title: "Sign in in browser", target: nil, action: nil)
+    let browserButton = NSButton(title: "Sign in", target: nil, action: nil)
     private let accountTitle = NSTextField(labelWithString: "Connect YouTube Music")
     private let accountStatus = NSTextField(wrappingLabelWithString: "")
     private let accountSpinner = NSProgressIndicator()
@@ -238,6 +238,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         horizontal(footer, [appLabel, muteButton, volume, gap(), accountButton, overflowButton], spacing: 5)
         fixed(footer, 30); add(footer)
         browserDirty = true
+        render()
     }
 
     private func makeAccountPane() {
@@ -277,6 +278,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
 
     func opened() {
         _ = view; visible = true
+        browserDirty = true
         render()
         if searchPending { submitSearch() } else { loadCurrent() }
     }
@@ -294,6 +296,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
             state.error != next.error || state.notice != next.notice || state.adding != next.adding
         let trackChanged = state.track?.id != next.track?.id
         let transportChanged = trackChanged || state.playing != next.playing || state.loading != next.loading
+        let hasAudioChanged = (state.track != nil || state.loading) != (next.track != nil || next.loading)
         if trackChanged || (state.loading && !next.loading) || next.error != nil { pendingSong = nil }
         if boundary {
             searchWork?.cancel(); searchWork = nil; searchPending = false
@@ -321,7 +324,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
             pages = next.signed_in ? Dictionary(uniqueKeysWithValues: updates.map { ($0.key, $0) }) : [:]
             browserDirty = true
         }
-        browserDirty = browserDirty || boundary || chromeChanged || trackChanged
+        browserDirty = browserDirty || boundary || chromeChanged || trackChanged || hasAudioChanged
         if visible {
             render()
             if transportChanged { updateVisibleRows() }
@@ -379,7 +382,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         accountButton.title = showingAccount && state.signed_in ? "Library" : "Account"
         accountButton.toolTip = state.account
         accountButton.setAccessibilityLabel(showingAccount && state.signed_in ? "Back to library" : "Account")
-        muteButton.isHidden = !hasAudio; volume.isHidden = !hasAudio; appLabel.isHidden = hasAudio
+        muteButton.isHidden = !hasAudio; volume.isHidden = !hasAudio; appLabel.isHidden = !player.isHidden
         let page = pages[location.key]
         let newRows = state.signed_in ? (page?.rows ?? []).filter { location.song == nil || $0.editable != nil } : []
         let moved = renderedLocation != location.identity
@@ -421,18 +424,26 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
     }
     private func renderAccount() {
         setText(accountTitle, state.account_checking ? "Connecting…" : (state.signed_in ? "YouTube Music" : "Connect YouTube Music"))
-        setText(accountStatus, state.signed_in ? state.account : (permissionRequired ? "Allow browser access, then reconnect." : (state.account_checking ? "Checking your browser session" : "Sign in in your browser, then connect.")))
+        setText(accountStatus, state.signed_in ? state.account : (permissionRequired ? "Allow browser access, then reconnect." : (state.account_checking ? "Checking your browser session" : "Sign in to YouTube Music, then connect.")))
         busy(accountSpinner, state.account_checking)
-        if profilePicker.itemArray.compactMap({ $0.representedObject as? String }) != state.profiles.map(\.id) || profilePicker.numberOfItems == 0 {
+        let selected = state.profiles.first { $0.id == state.profile }
+        let missing = state.profile != nil && selected == nil
+        let choices = (missing ? [Profile(id: state.profile!, label: "Selected profile unavailable")] : []) + state.profiles
+        if profilePicker.itemArray.compactMap({ $0.representedObject as? String }) != choices.map(\.id) ||
+           profilePicker.itemTitles != choices.map(\.label) {
             profilePicker.removeAllItems()
-            if state.profiles.isEmpty { profilePicker.addItem(withTitle: "Chrome, Brave or Chromium") }
-            for profile in state.profiles { profilePicker.addItem(withTitle: profile.label); profilePicker.lastItem?.representedObject = profile.id }
+            for profile in choices {
+                profilePicker.addItem(withTitle: profile.label)
+                profilePicker.lastItem?.representedObject = profile.id
+                profilePicker.lastItem?.isEnabled = !missing || profile.id != state.profile
+            }
         }
         if let selected = state.profile, let item = profilePicker.itemArray.first(where: { $0.representedObject as? String == selected }) { profilePicker.select(item) }
-        profilePicker.isHidden = state.profiles.count <= 1
-        profilePicker.isEnabled = !state.account_checking && state.profiles.count > 1
+        profilePicker.isHidden = choices.count <= 1
+        profilePicker.isEnabled = !state.account_checking && choices.count > 1
         profileLabel.isHidden = !profilePicker.isHidden
-        setText(profileLabel, state.profiles.first?.label ?? "Chrome, Brave or Chromium")
+        setText(profileLabel, selected?.label ?? (missing ? "Selected profile unavailable" : (state.profiles.first?.label ?? "Chrome, Brave or Chromium")))
+        profilePicker.menu?.autoenablesItems = false
         reconnectButton.title = state.account_checking ? "Connecting…" : (state.signed_in || state.profile != nil ? "Reconnect" : "Connect")
         reconnectButton.isEnabled = !state.account_checking
         accessButton.isHidden = !permissionRequired
