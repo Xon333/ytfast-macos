@@ -75,3 +75,55 @@ async fn native_audio_transport() {
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn cancelled_ipc_command_releases_its_pending_reply() {
+    let (socket, peer) = UnixStream::pair().unwrap();
+    let (_reader, writer) = socket.into_split();
+    let child = tokio::process::Command::new("/usr/bin/true")
+        .spawn()
+        .unwrap();
+    let player = Arc::new(Mpv {
+        serial: 0,
+        writer: Mutex::new(writer),
+        next_id: AtomicU64::new(1),
+        pending: Arc::default(),
+        _child: child,
+    });
+    let copy = player.clone();
+    let command = tokio::spawn(async move { copy.get("pause").await });
+    let mut peer = BufReader::new(peer).lines();
+    assert!(peer.next_line().await.unwrap().is_some());
+    assert_eq!(player.pending.lock().unwrap().len(), 1);
+    command.abort();
+    assert!(command.await.unwrap_err().is_cancelled());
+    assert!(player.pending.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn lost_ipc_reply_fails_immediately_and_releases_state() {
+    let (socket, peer) = UnixStream::pair().unwrap();
+    let (_reader, writer) = socket.into_split();
+    let child = tokio::process::Command::new("/usr/bin/true")
+        .spawn()
+        .unwrap();
+    let player = Arc::new(Mpv {
+        serial: 0,
+        writer: Mutex::new(writer),
+        next_id: AtomicU64::new(1),
+        pending: Arc::default(),
+        _child: child,
+    });
+    let copy = player.clone();
+    let command = tokio::spawn(async move { copy.get("pause").await });
+    let mut peer = BufReader::new(peer).lines();
+    assert!(peer.next_line().await.unwrap().is_some());
+    // This is the reader's EOF path: every outstanding sender is dropped.
+    player.pending.lock().unwrap().clear();
+    let result = tokio::time::timeout(Duration::from_millis(250), command)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.unwrap_err().to_string().contains("mpv closed"));
+    assert!(player.pending.lock().unwrap().is_empty());
+}

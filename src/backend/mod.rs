@@ -299,20 +299,19 @@ impl Drop for Backend {
 }
 
 enum Internal {
-    Connected(Account),
-    AuthFailed,
+    Connected(session::Connection),
+    AuthFailed(u64),
     Started {
         generation: u64,
-        stream: anyhow::Result<Stream>,
+        result: Result<(Stream, Arc<Mpv>), playback::StartError>,
     },
-    /// The next song resolved, with its player response when it was fetched.
+    /// The next song resolved, independently of optional player metadata.
     NextReady {
         generation: u64,
         /// Its queue entry.
         id: u64,
         video_id: String,
         stream: Stream,
-        player: Option<sound::PlayerInfo>,
     },
     Watch {
         generation: u64,
@@ -342,8 +341,9 @@ enum Internal {
     },
     /// A song's player response (loudness, play tracking).
     Player {
+        epoch: u64,
         video_id: String,
-        info: sound::PlayerInfo,
+        info: Option<sound::PlayerInfo>,
     },
     /// The sleep timer's clock, for the timer `stamp`.
     SleepTick {
@@ -382,6 +382,9 @@ struct Worker {
     /// The main deck: the current song plays on it.
     mpv: Option<Arc<Mpv>>,
     last_connect: Option<Instant>,
+    connect_epoch: u64,
+    connecting: Option<tokio::task::AbortHandle>,
+    session_cookie: Option<session::CookieFile>,
     last_death: Option<Instant>,
 
     queue: queue::Queue,
@@ -416,10 +419,21 @@ struct Worker {
     /// when they no longer apply.
     resolving: Option<tokio::task::AbortHandle>,
     prefetching: Option<tokio::task::AbortHandle>,
+    /// The next URL can arrive while the current URL/player is still starting.
+    ready_next: Option<playback::NextStream>,
+    /// Fetching a chosen playlist/radio and its continuations.
+    queue_request: Option<tokio::task::AbortHandle>,
+    /// Retained when loading is cancelled so Play retries the selected list.
+    pending_target: Option<Target>,
+    /// Until mpv reports playback-restart for the selected entry.
+    starting: bool,
+    buffering: bool,
+    seeking: bool,
     /// When the current song was asked for, to log how long it took to start.
     asked: Instant,
     /// Loudness and play tracking from player responses, by video id.
     players: HashMap<String, sound::PlayerInfo>,
+    player_requests: HashMap<String, (u64, tokio::task::AbortHandle)>,
     /// The `af` value every deck has.
     af: String,
     /// Bumped by every equalizer change.
@@ -452,6 +466,9 @@ impl Worker {
             mpv_rx: Some(mpv_rx),
             mpv: None,
             last_connect: None,
+            connect_epoch: 0,
+            connecting: None,
+            session_cookie: None,
             last_death: None,
             queue: queue::Queue::default(),
             pos: None,
@@ -479,8 +496,15 @@ impl Worker {
             resume_at: None,
             resolving: None,
             prefetching: None,
+            ready_next: None,
+            queue_request: None,
+            pending_target: None,
+            starting: false,
+            buffering: false,
+            seeking: false,
             asked: Instant::now(),
             players: HashMap::new(),
+            player_requests: HashMap::new(),
             af: String::new(),
             eq_stamp: 0,
             sleep_stamp: Arc::default(),
@@ -527,7 +551,9 @@ impl Worker {
                 search,
                 shelf,
             } => {
-                let client = self.client.clone();
+                let current = self.client.clone();
+                let client = current.snapshot();
+                let epoch = client.session_epoch();
                 let sink = self.sink.clone();
                 let internal = self.internal_tx.clone();
                 tokio::spawn(async move {
@@ -537,25 +563,31 @@ impl Worker {
                         client.continuation(&token).await
                     };
                     if matches!(result, Err(ApiError::Auth)) {
-                        let _ = internal.send(Internal::AuthFailed);
+                        let _ = internal.send(Internal::AuthFailed(epoch));
                     }
                     let result = result.map(|v| parse::more(&v)).map_err(|e| e.to_string());
-                    sink.send(Event::More {
-                        key,
-                        shelf,
-                        token,
-                        result,
+                    current.if_current(epoch, || {
+                        sink.send(Event::More {
+                            key,
+                            shelf,
+                            token,
+                            result,
+                        })
                     });
                 });
             }
             Command::Suggest(input) => {
-                let client = self.client.clone();
+                let current = self.client.clone();
+                let client = current.snapshot();
+                let epoch = client.session_epoch();
                 let sink = self.sink.clone();
                 tokio::spawn(async move {
                     if let Ok(value) = client.suggestions(&input).await {
-                        sink.send(Event::Suggestions {
-                            items: parse::suggestions(&value),
-                            input,
+                        current.if_current(epoch, || {
+                            sink.send(Event::Suggestions {
+                                items: parse::suggestions(&value),
+                                input,
+                            })
                         });
                     }
                 });
@@ -596,70 +628,8 @@ impl Worker {
                     self.start(pos).await;
                 }
             }
-            Command::PlayTarget(target) => {
-                let epoch = self.new_epoch();
-                self.decks.radio = deck::is_radio(&target);
-                self.state.loading = true;
-                self.emit(true);
-                let client = self.client.clone();
-                let tx = self.internal_tx.clone();
-                tokio::spawn(async move {
-                    let result = client.next(&target).await.map(|v| parse::watch_next(&v));
-                    if matches!(result, Err(ApiError::Auth)) {
-                        let _ = tx.send(Internal::AuthFailed);
-                    }
-                    let result = result.map_err(|e| e.to_string()).and_then(|info| {
-                        if info.tracks.is_empty() {
-                            Err("Nothing to play here".to_owned())
-                        } else {
-                            Ok(info)
-                        }
-                    });
-                    let mut token = result
-                        .as_ref()
-                        .ok()
-                        .and_then(|info| info.continuation.clone());
-                    let mut total = result.as_ref().map(|info| info.tracks.len()).unwrap_or(0);
-                    let _ = tx.send(Internal::Queue { epoch, result });
-                    // Long playlists and albums: fetch the rest of the queue.
-                    while let Some(t) = token.take().filter(|_| total < 500) {
-                        let Ok(value) = client.next_continuation(&t).await else {
-                            break;
-                        };
-                        let more = parse::watch_next(&value);
-                        if more.tracks.is_empty() {
-                            break;
-                        }
-                        total += more.tracks.len();
-                        token = more.continuation.clone();
-                        let extended = Internal::Extended {
-                            epoch,
-                            tracks: more.tracks,
-                            then_play: false,
-                            autoplay: false,
-                        };
-                        if tx.send(extended).is_err() {
-                            break;
-                        }
-                    }
-                });
-            }
-            Command::TogglePause => {
-                if self.state.loading {
-                    // Resolving: nothing to pause yet.
-                } else if let (Some(mpv), false) = (self.mpv.clone(), self.idle) {
-                    if self.state.playing {
-                        // Pausing in a blend ends it: the new song pauses alone.
-                        self.finish_blend().await;
-                    }
-                    let _ = mpv.set("pause", json!(self.state.playing)).await;
-                } else if let Some(pos) = self.pos {
-                    // Nothing loaded (a restored session, the queue ended, or
-                    // mpv restarted): play, from where a restored song was.
-                    let at = self.resume_at.take();
-                    self.start_at(pos, at).await;
-                }
-            }
+            Command::PlayTarget(target) => self.play_target(target).await,
+            Command::TogglePause => self.toggle_pause().await,
             Command::Next => self.next(false).await,
             Command::Previous => {
                 if self.state.position > 3.0 || self.pos == Some(0) {
@@ -716,9 +686,10 @@ impl Worker {
                 let mut settings = crate::settings::Settings::load(&self.paths);
                 settings.browser_profile = Some(profile);
                 if let Err(error) = settings.save(&self.paths) {
-                    self.sink.send(Event::Error(format!(
-                        "Couldn't save the account choice: {error}"
-                    )));
+                    self.sink.send(Event::Account(Account::Unverified {
+                        reason: format!("Couldn't save the account choice: {error}"),
+                    }));
+                    return;
                 }
                 self.connect();
             }
@@ -795,7 +766,9 @@ impl Worker {
             #[cfg(feature = "e2e")]
             Command::SampleDecks(on) => self.sample_decks(on),
             Command::QuickSearch(query) => {
-                let client = self.client.clone();
+                let current = self.client.clone();
+                let client = current.snapshot();
+                let epoch = client.session_epoch();
                 let sink = self.sink.clone();
                 tokio::spawn(async move {
                     let result = client
@@ -803,7 +776,7 @@ impl Worker {
                         .await
                         .map(|v| Box::new(parse::page(&v)))
                         .map_err(|e| e.to_string());
-                    sink.send(Event::QuickResults { query, result });
+                    current.if_current(epoch, || sink.send(Event::QuickResults { query, result }));
                 });
             }
         }

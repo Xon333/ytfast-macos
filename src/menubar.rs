@@ -120,9 +120,19 @@ impl PageEntry {
         }
     }
 
-    fn replace(&mut self, page: Page) {
+    fn refresh(&mut self, seq: u64) {
+        self.seq = seq;
+        self.touched = Instant::now();
+        self.page.loading = true;
+        self.page.message = None;
+        self.pending = None;
+    }
+
+    fn replace(&mut self, page: Page, cached: bool) {
         self.page.rows.clear();
         self.tokens.clear();
+        self.page.title.clear();
+        self.page.play = None;
         if let Some(h) = page.header {
             self.page.title = h.title;
             self.page.play = h.play.and_then(|t| serde_json::to_string(&t).ok());
@@ -142,8 +152,10 @@ impl PageEntry {
         if let Some(token) = page.continuation {
             self.tokens.push(Continuation { token, shelf: None });
         }
-        self.fetched = Some(Instant::now());
-        self.page.loading = false;
+        if !cached {
+            self.fetched = Some(Instant::now());
+        }
+        self.page.loading = cached;
         self.pending = None;
         self.finish();
     }
@@ -224,6 +236,9 @@ enum Request {
     Volume {
         value: f64,
     },
+    Seek {
+        value: f64,
+    },
     Add {
         playlist: String,
         video: String,
@@ -282,8 +297,12 @@ impl Core {
             }
         }
         self.seq += 1;
-        self.pages
-            .insert(key, PageEntry::new(target.clone(), self.seq));
+        if let Some(entry) = self.pages.get_mut(&key) {
+            entry.refresh(self.seq);
+        } else {
+            self.pages
+                .insert(key, PageEntry::new(target.clone(), self.seq));
+        }
         self.catalog_dirty = true;
         self.backend.send(Command::Page {
             target,
@@ -294,14 +313,14 @@ impl Core {
     fn transport(&self, action: &str) -> Result<()> {
         let now = self.backend.now.borrow();
         let command = match action {
-            "play" if now.playback.playing => return Ok(()),
-            "pause" if !now.playback.playing => return Ok(()),
+            "play" if now.playback.playing || now.playback.loading => return Ok(()),
+            "pause" if !now.playback.playing && !now.playback.loading => return Ok(()),
             "play" | "pause" | "toggle" => Command::TogglePause,
             "next" => Command::Next,
             "previous" => Command::Previous,
             _ => bail!("Unknown playback command"),
         };
-        if now.track().is_some() {
+        if now.track().is_some() || now.playback.loading {
             self.backend.send(command);
         }
         Ok(())
@@ -355,6 +374,16 @@ impl Core {
                 }
                 self.backend.send(Command::Volume(value.clamp(0.0, 100.0)));
             }
+            Request::Seek { value } => {
+                if !value.is_finite() {
+                    bail!("Invalid position");
+                }
+                let now = self.backend.now.borrow();
+                if now.track().is_some() && now.playback.duration > 0.0 {
+                    self.backend
+                        .send(Command::Seek(value.clamp(0.0, now.playback.duration)));
+                }
+            }
             Request::Add { playlist, video } => {
                 if !matches!(self.account, Account::SignedIn { .. }) {
                     bail!("Reconnect before adding a song");
@@ -380,6 +409,7 @@ impl Core {
                 }
                 self.seq += 1;
                 self.pending_add = Some(self.seq);
+                self.error = None;
                 self.notice = Some("Adding song…".into());
                 self.backend.send(Command::AccountEdit {
                     op: self.seq,
@@ -416,6 +446,7 @@ impl Core {
         self.catalog_dirty = true;
         self.pending_add = None;
         self.notice = None;
+        self.error = None;
     }
 
     fn poll(&mut self) {
@@ -484,17 +515,22 @@ impl Core {
                     self.profiles = list;
                     self.profile = current;
                 }
-                // Disk page caches are not account-scoped upstream. Never publish them
-                // in the menu: current authenticated requests are the source of truth.
+                // The backend validates the active account scope before publishing
+                // snapshots. Keep them usable while the fresh request is in flight.
                 Event::Page {
                     key,
                     seq,
                     result,
-                    cached: false,
+                    cached,
                 } => {
                     if let Some(entry) = self.pages.get_mut(&key).filter(|e| e.seq == seq) {
                         match result {
-                            Ok(page) => entry.replace(*page),
+                            Ok(page) => {
+                                // A late disk read must never overwrite a fresh reply.
+                                if !cached || entry.fetched.is_none() {
+                                    entry.replace(*page, cached);
+                                }
+                            }
                             Err(error) => {
                                 entry.page.loading = false;
                                 entry.page.message = Some(error);
@@ -581,7 +617,8 @@ impl Core {
         });
         json!({"track":track,"playing":pb.playing,"loading":pb.loading,"position":pb.position,
             "duration":pb.duration,"volume":pb.volume,"shuffle":pb.shuffle,"format":pb.format,
-            "signed_in":signed_in,"account":status,"profile":self.profile,
+            "signed_in":signed_in,"account_checking":matches!(self.account, Account::Checking),
+            "account":status,"profile":self.profile,
             "profiles":self.profiles.iter().map(|p|json!({"id":p.id,"label":p.label})).collect::<Vec<_>>(),
             "pages":pages,"notice":self.notice,"error":self.error,"adding":self.pending_add.is_some(),
             "show":std::mem::take(&mut self.show),"quit":self.quit})

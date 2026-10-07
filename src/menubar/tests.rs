@@ -88,3 +88,45 @@ fn native_command_input_is_bounded_and_rejects_unknown_actions() {
     assert!(serde_json::from_str::<Request>(r#"{"op":"delete_all"}"#).is_err());
     assert!(serde_json::from_str::<Request>(r#"{"op":"add","playlist":"PL1"}"#).is_err());
 }
+
+#[test]
+fn refresh_keeps_rows_and_failed_refresh_does_not_replay_old_header_actions() {
+    let mut entry = PageEntry::new(Target::browse("VLPLtest"), 7);
+    entry.page.rows = vec![MenuRow {
+        title: "Saved song".into(),
+        ..Default::default()
+    }];
+    entry.page.play = Some("old playlist".into());
+    entry.page.loading = false;
+    entry.refresh(8);
+    assert_eq!(entry.seq, 8);
+    assert_eq!(entry.page.rows[0].title, "Saved song");
+    assert!(entry.page.loading);
+    entry.page.loading = false;
+    entry.page.message = Some("Offline".into());
+    assert_eq!(entry.page.rows.len(), 1);
+    entry.replace(Page::default(), false);
+    assert!(
+        entry.page.play.is_none(),
+        "a new page without a header must not inherit old Play"
+    );
+}
+
+#[test]
+fn account_snapshot_is_visible_while_network_refresh_is_pending() {
+    let mut entry = PageEntry::new(Target::browse("VLPLtest"), 1);
+    let page = Page {
+        header: Some(crate::model::Header {
+            title: "Saved playlist".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    entry.replace(page.clone(), true);
+    assert_eq!(entry.page.title, "Saved playlist");
+    assert!(entry.page.loading);
+    assert!(entry.fetched.is_none());
+    entry.replace(page, false);
+    assert!(!entry.page.loading);
+    assert!(entry.fetched.is_some());
+}

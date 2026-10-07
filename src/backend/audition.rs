@@ -193,7 +193,7 @@ impl super::Worker {
                     a.started = true;
                 }
             }
-            MpvEvent::Property { name, data } if name == "time-pos" => {
+            MpvEvent::Property { name, data, .. } if name == "time-pos" => {
                 // Audio is coming: fade in over the ducking current song.
                 if a.started && a.held.is_some() && data.as_f64().is_some() {
                     a.started = false;
@@ -222,7 +222,7 @@ impl super::Worker {
                     self.end_audition().await;
                 }
             }
-            MpvEvent::Property { .. } => {}
+            MpvEvent::Property { .. } | MpvEvent::PlaybackRestart { .. } => {}
         }
     }
 

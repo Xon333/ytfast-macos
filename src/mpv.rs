@@ -25,6 +25,8 @@ static SERIAL: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug)]
 pub enum MpvEvent {
     Property {
+        /// Entry active when mpv emitted this property, to reject stale events.
+        entry: i64,
         name: String,
         data: Value,
     },
@@ -37,8 +39,25 @@ pub enum MpvEvent {
     StartFile {
         entry: i64,
     },
+    /// Decoding/output has restarted after loading or seeking this entry.
+    PlaybackRestart {
+        entry: i64,
+    },
     /// The process exited.
     Died,
+}
+
+/// A command must leave the pending table even if its caller is cancelled,
+/// writing fails, or mpv never sends a reply.
+struct PendingCommand {
+    id: u64,
+    pending: Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<Value>>>>,
+}
+
+impl Drop for PendingCommand {
+    fn drop(&mut self) {
+        self.pending.lock().expect("pending lock").remove(&self.id);
+    }
 }
 
 pub struct Mpv {
@@ -116,6 +135,7 @@ impl Mpv {
         let pending_reader = pending.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(reader).lines();
+            let mut entry = -1;
             while let Ok(Some(line)) = lines.next_line().await {
                 let Ok(message) = serde_json::from_str::<Value>(&line) else {
                     continue;
@@ -128,6 +148,7 @@ impl Mpv {
                 }
                 let event = match message.get("event").and_then(Value::as_str) {
                     Some("property-change") => MpvEvent::Property {
+                        entry,
                         name: message
                             .get("name")
                             .and_then(Value::as_str)
@@ -150,18 +171,22 @@ impl Mpv {
                             .and_then(Value::as_str)
                             .map(str::to_owned),
                     },
-                    Some("start-file") => MpvEvent::StartFile {
-                        entry: message
+                    Some("start-file") => {
+                        entry = message
                             .get("playlist_entry_id")
                             .and_then(Value::as_i64)
-                            .unwrap_or(-1),
-                    },
+                            .unwrap_or(-1);
+                        MpvEvent::StartFile { entry }
+                    }
+                    Some("playback-restart") => MpvEvent::PlaybackRestart { entry },
                     _ => continue,
                 };
                 if events.send((serial, event)).is_err() {
-                    return;
+                    break;
                 }
             }
+            // Dropping the senders wakes every command immediately on EOF.
+            pending_reader.lock().expect("pending lock").clear();
             let _ = events.send((serial, MpvEvent::Died));
         });
         let mpv = Arc::new(Self {
@@ -191,18 +216,23 @@ impl Mpv {
             .lock()
             .expect("pending lock")
             .insert(id, sender);
+        let _pending = PendingCommand {
+            id,
+            pending: self.pending.clone(),
+        };
         let mut line = serde_json::to_vec(&json!({ "command": args, "request_id": id }))?;
         line.push(b'\n');
-        self.writer
-            .lock()
-            .await
-            .write_all(&line)
-            .await
-            .context("writing to mpv")?;
-        let reply = tokio::time::timeout(Duration::from_secs(5), receiver)
-            .await
-            .map_err(|_| anyhow!("mpv did not answer"))?
-            .map_err(|_| anyhow!("mpv closed"))?;
+        let reply = tokio::time::timeout(Duration::from_secs(2), async {
+            self.writer
+                .lock()
+                .await
+                .write_all(&line)
+                .await
+                .context("writing to mpv")?;
+            receiver.await.map_err(|_| anyhow!("mpv closed"))
+        })
+        .await
+        .map_err(|_| anyhow!("mpv did not answer"))??;
         match reply.get("error").and_then(Value::as_str) {
             Some("success") => Ok(reply.get("data").cloned().unwrap_or(Value::Null)),
             Some(error) => bail!("mpv: {error}"),

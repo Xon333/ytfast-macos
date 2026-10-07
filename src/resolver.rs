@@ -1,22 +1,19 @@
 //! Turns a video id into a playable audio URL through yt-dlp.
 //!
 //! yt-dlp solves YouTube's JS challenges and, with the session's cookies,
-//! reaches Premium's Opus ~256 kbps (itag 774). A run takes ~4 s on the test
-//! machine whatever is tried, but runs scale: three at once finish in ~4.9 s
-//! (docs/integration.md). So resolves run in parallel at two priorities.
+//! reaches Premium's Opus ~256 kbps (itag 774). Cold lookups depend on YouTube
+//! and its JS challenges. Resolves run concurrently at two priorities.
 //! Playback (the current song, then the next one) has its own slots and
 //! never waits behind speculation; speculation (songs on screen, under the
 //! pointer, further ahead in the queue) has two more slots, runs niced, and
 //! keeps a short most-likely-first backlog. A song asked for twice shares
 //! one run, and a playback run nobody waits for any more is stopped.
-//! Results are cached until ten minutes before the URL expires, in memory
-//! and in the runtime directory (0600), so a relaunch can start at once.
+//! Results are cached within the verified account until ten minutes before
+//! the URL expires, in memory and in the private runtime directory (0600).
 //! The iOS client's direct URLs were tried and dropped: they stop after the
 //! first bytes.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -43,8 +40,6 @@ struct Cached {
     url: String,
     user_agent: Option<String>,
     expires: u64,
-    /// Resolved with the account's cookies, so with its formats.
-    signed_in: bool,
 }
 
 impl Cached {
@@ -56,6 +51,21 @@ impl Cached {
             expires: self.expires,
         }
     }
+}
+
+/// A saved cache belongs to exactly one browser/account session. The enclosing
+/// shape intentionally rejects the old, unscoped map of signed stream URLs.
+#[derive(Default, Serialize, Deserialize)]
+struct Cache {
+    scope: Option<String>,
+    streams: HashMap<String, Cached>,
+}
+
+#[derive(Clone, Default)]
+struct CookieSession {
+    path: Option<PathBuf>,
+    scope: Option<String>,
+    generation: u64,
 }
 
 type Outcome = Option<Result<Stream, String>>;
@@ -70,9 +80,9 @@ struct Flight {
 }
 
 pub struct Resolver {
-    cache: Mutex<HashMap<String, Cached>>,
-    /// The session's cookies for yt-dlp; `None` when signed out.
-    cookie_file: Mutex<Option<PathBuf>>,
+    cache: Mutex<Cache>,
+    /// The verified session and an opaque, account-specific cache scope.
+    cookies: Mutex<CookieSession>,
     /// The runtime directory: cookie copies and the saved cache.
     scratch: PathBuf,
     flights: Mutex<HashMap<String, Arc<Flight>>>,
@@ -200,20 +210,18 @@ impl Resolver {
     /// Starts with the streams saved by an earlier run that are still valid.
     pub fn new(scratch: PathBuf) -> Self {
         let deadline = now() + MARGIN;
-        let saved: HashMap<String, Cached> = std::fs::read(scratch.join("streams.json"))
+        let mut cache: Cache = std::fs::read(scratch.join("streams.json"))
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
-        let cache: HashMap<String, Cached> = saved
-            .into_iter()
-            .filter(|(_, c)| c.expires > deadline)
-            .collect();
-        if !cache.is_empty() {
-            log::info!("{} saved streams still valid", cache.len());
+        cache.streams.retain(|_, c| c.expires > deadline);
+        Self::trim_cache(&mut cache.streams);
+        if !cache.streams.is_empty() {
+            log::info!("{} saved streams still valid", cache.streams.len());
         }
         Self {
             cache: Mutex::new(cache),
-            cookie_file: Mutex::default(),
+            cookies: Mutex::default(),
             scratch,
             flights: Mutex::default(),
             playback: Arc::new(Semaphore::new(PLAYBACK_SLOTS)),
@@ -224,29 +232,64 @@ impl Resolver {
         }
     }
 
-    /// Streams resolved without cookies don't count once signed in (they
-    /// lack the account's formats); the others stay usable whatever happens
-    /// to the session, since stream URLs carry no cookies.
-    pub fn set_cookie_file(&self, path: Option<PathBuf>) {
-        *self.cookie_file.lock().expect("cookie lock") = path;
+    /// Install a verified account's cookie export. An account change cancels
+    /// old work and discards its URLs; relaunching the same session can reuse
+    /// the private, expiring cache without resolving every song again.
+    pub fn set_cookie_file(&self, path: Option<PathBuf>, scope: Option<String>) {
+        let aborts = {
+            // Same lock order as request: flights, cookies, cache.
+            let mut flights = self.flights.lock().expect("flights lock");
+            let mut cookies = self.cookies.lock().expect("cookie lock");
+            let changed = cookies.scope != scope || cookies.path.is_some() != path.is_some();
+            cookies.path = path;
+            cookies.scope = scope.clone();
+            let mut cache = self.cache.lock().expect("cache lock");
+            if cache.scope != scope {
+                cache.scope = scope;
+                cache.streams.clear();
+            }
+            if changed {
+                cookies.generation = cookies.generation.wrapping_add(1);
+                self.backlog.lock().expect("backlog lock").clear();
+                flights
+                    .drain()
+                    .filter_map(|(_, flight)| {
+                        flight.result.send_replace(Some(Err(
+                            "The account changed. Press Play again.".into(),
+                        )));
+                        flight.abort.lock().expect("abort lock").take()
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            }
+        };
+        for abort in aborts {
+            abort.abort();
+        }
+        self.save();
     }
 
-    fn signed_in(&self) -> bool {
-        self.cookie_file.lock().expect("cookie lock").is_some()
-    }
-
-    /// A cached stream still valid for ten minutes.
+    /// A cached stream for this exact account, still valid for ten minutes.
     pub fn cached(&self, video_id: &str) -> Option<Stream> {
-        let signed_in = self.signed_in();
+        let cookies = self.cookies.lock().expect("cookie lock");
         let cache = self.cache.lock().expect("cache lock");
+        if cache.scope != cookies.scope {
+            return None;
+        }
         cache
+            .streams
             .get(video_id)
-            .filter(|c| c.expires > now() + MARGIN && (c.signed_in || !signed_in))
+            .filter(|c| c.expires > now() + MARGIN)
             .map(Cached::stream)
     }
 
     pub fn forget(&self, video_id: &str) {
-        self.cache.lock().expect("cache lock").remove(video_id);
+        self.cache
+            .lock()
+            .expect("cache lock")
+            .streams
+            .remove(video_id);
         self.save();
     }
 
@@ -418,6 +461,7 @@ impl Resolver {
         permit: Option<OwnedSemaphorePermit>,
     ) -> Arc<Flight> {
         let speculative = permit.is_some();
+        let session = self.cookies.lock().expect("cookie lock").clone();
         let flight = Arc::new(Flight {
             result: watch::Sender::new(None),
             waiters: AtomicUsize::new(0),
@@ -444,10 +488,10 @@ impl Resolver {
             };
             let waited = queued.elapsed();
             let started = Instant::now();
-            let result = this.run_ytdlp(&id, speculative).await;
+            let result = this.run_ytdlp(&id, speculative, &session).await;
             let kind = if speculative { "ahead" } else { "for playback" };
             match &result {
-                Ok((stream, _)) => log::info!(
+                Ok(stream) => log::info!(
                     "resolved {id} {kind}: itag {} in {:.1}s (waited {:.1}s for a slot)",
                     stream.itag,
                     started.elapsed().as_secs_f64(),
@@ -458,15 +502,24 @@ impl Resolver {
                     started.elapsed().as_secs_f64()
                 ),
             }
-            let outcome = match result {
-                Ok((stream, signed_in)) => {
-                    this.store(&id, &stream, signed_in);
-                    Ok(stream)
+            {
+                let cookies = this.cookies.lock().expect("cookie lock");
+                if cookies.generation != session.generation {
+                    return;
                 }
-                Err(error) => Err(format!("{error:#}")),
-            };
-            shared.result.send_replace(Some(outcome));
+                let outcome = match result {
+                    Ok(stream) => {
+                        this.store(&id, &stream, session.scope);
+                        Ok(stream)
+                    }
+                    Err(error) => Err(format!("{error:#}")),
+                };
+                shared.result.send_replace(Some(outcome));
+            }
             drop(permit);
+            // Disk persistence does not sit between a resolved URL and playback.
+            let saving = this.clone();
+            tokio::task::spawn_blocking(move || saving.save());
             if speculative {
                 this.pump();
             }
@@ -475,11 +528,9 @@ impl Resolver {
         flight
     }
 
-    fn store(&self, video_id: &str, stream: &Stream, signed_in: bool) {
-        let mut cache = self.cache.lock().expect("cache lock");
+    fn trim_cache(cache: &mut HashMap<String, Cached>) {
         if cfg!(feature = "menubar") {
-            cache.retain(|_, item| item.expires > now() + MARGIN);
-            while cache.len() >= 32 {
+            while cache.len() > 32 {
                 let oldest = cache
                     .iter()
                     .min_by_key(|(_, item)| item.expires)
@@ -491,18 +542,29 @@ impl Resolver {
                 }
             }
         }
-        cache.insert(
+    }
+
+    /// Caller holds the session lock, so an old resolve cannot repopulate a
+    /// new account's cache between the generation check and insertion.
+    fn store(&self, video_id: &str, stream: &Stream, scope: Option<String>) {
+        let mut cache = self.cache.lock().expect("cache lock");
+        if cache.scope != scope {
+            cache.scope = scope;
+            cache.streams.clear();
+        }
+        cache
+            .streams
+            .retain(|_, item| item.expires > now() + MARGIN);
+        cache.streams.insert(
             video_id.to_owned(),
             Cached {
                 itag: stream.itag,
                 url: stream.url.clone(),
                 user_agent: stream.user_agent.clone(),
                 expires: stream.expires,
-                signed_in,
             },
         );
-        drop(cache);
-        self.save();
+        Self::trim_cache(&mut cache.streams);
     }
 
     /// Writes the valid streams to the runtime directory, readable only by
@@ -510,43 +572,50 @@ impl Resolver {
     fn save(&self) {
         let _turn = self.saving.lock().expect("saving lock");
         let bytes = {
-            let cache = self.cache.lock().expect("cache lock");
+            let mut cache = self.cache.lock().expect("cache lock");
             let deadline = now() + MARGIN;
-            let valid: HashMap<&String, &Cached> =
-                cache.iter().filter(|(_, c)| c.expires > deadline).collect();
-            match serde_json::to_vec(&valid) {
+            cache.streams.retain(|_, c| c.expires > deadline);
+            match serde_json::to_vec(&*cache) {
                 Ok(bytes) => bytes,
                 Err(_) => return,
             }
         };
         let path = self.scratch.join("streams.json");
-        let temporary = self
-            .scratch
-            .join(format!("streams.json.tmp{}", std::process::id()));
-        let written = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temporary)
-            .and_then(|mut file| file.write_all(&bytes))
-            .and_then(|()| std::fs::rename(&temporary, &path));
+        let written = crate::paths::write_atomic(&path, &bytes);
         if let Err(error) = written {
             log::warn!("couldn't save resolved streams: {error}");
         }
     }
 
-    /// One yt-dlp run; also says whether it had the account's cookies.
-    async fn run_ytdlp(&self, video_id: &str, speculative: bool) -> Result<(Stream, bool)> {
-        let cookies = self.cookie_file.lock().expect("cookie lock").clone();
-        // yt-dlp rewrites the cookie file it is given, so it gets a copy.
-        let copy = cookies.as_ref().map(|_| {
-            let run = self.runs.fetch_add(1, Ordering::Relaxed);
-            CookieCopy(self.scratch.join(format!("ytdlp-{video_id}-{run}.txt")))
-        });
-        if let (Some(from), Some(to)) = (&cookies, &copy) {
-            std::fs::copy(from, &to.0).context("copying cookies for yt-dlp")?;
+    /// One yt-dlp run using the session captured when it was requested.
+    async fn run_ytdlp(
+        &self,
+        video_id: &str,
+        speculative: bool,
+        session: &CookieSession,
+    ) -> Result<Stream> {
+        if video_id.is_empty()
+            || video_id.len() > 64
+            || !video_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            bail!("Invalid YouTube song identifier");
         }
+        let copy = {
+            let active = self.cookies.lock().expect("cookie lock");
+            if active.generation != session.generation {
+                bail!("The account changed. Press Play again.");
+            }
+            let copy = active.path.as_ref().map(|_| {
+                let run = self.runs.fetch_add(1, Ordering::Relaxed);
+                CookieCopy(self.scratch.join(format!("ytdlp-{video_id}-{run}.txt")))
+            });
+            if let (Some(from), Some(to)) = (&active.path, &copy) {
+                std::fs::copy(from, &to.0).context("copying cookies for yt-dlp")?;
+            }
+            copy
+        };
         // Guesses yield the CPU to playback's runs.
         let mut command = if speculative {
             let mut nice = tokio::process::Command::new("/usr/bin/nice");
@@ -560,6 +629,8 @@ impl Resolver {
             "--ignore-config",
             "--no-warnings",
             "--no-playlist",
+            "--socket-timeout=10",
+            "--extractor-retries=1",
             "-f",
             "774/141/251/140/250/249/139",
         ]);
@@ -577,7 +648,7 @@ impl Resolver {
             .kill_on_drop(true)
             .stdin(std::process::Stdio::null());
         let output =
-            tokio::time::timeout(std::time::Duration::from_secs(60), command.output()).await;
+            tokio::time::timeout(std::time::Duration::from_secs(30), command.output()).await;
         drop(copy);
         let output = output
             .context("yt-dlp timed out")?
@@ -608,6 +679,125 @@ impl Resolver {
             url: url.to_owned(),
             user_agent: (agent != "NA").then(|| agent.to_owned()),
         };
-        Ok((stream, cookies.is_some()))
+        Ok(stream)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("ytfast-resolver-{:032x}", fastrand::u128(..)));
+            crate::paths::private_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn stream() -> Stream {
+        Stream {
+            itag: 774,
+            url: "https://example.invalid/private-stream".into(),
+            user_agent: None,
+            expires: now() + 3600,
+        }
+    }
+
+    #[test]
+    fn saved_premium_streams_are_reused_only_by_the_verified_account() {
+        let dir = Scratch::new();
+        let resolver = Resolver::new(dir.0.clone());
+        resolver.set_cookie_file(Some(dir.0.join("cookies-a")), Some("account-a".into()));
+        resolver.store("song", &stream(), Some("account-a".into()));
+        resolver.save();
+        assert_eq!(
+            std::fs::metadata(dir.0.join("streams.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let restored = Resolver::new(dir.0.clone());
+        assert!(
+            restored.cached("song").is_none(),
+            "unverified launch must not use an account's URL"
+        );
+        restored.set_cookie_file(Some(dir.0.join("new-cookies-a")), Some("account-a".into()));
+        assert_eq!(restored.cached("song").unwrap().itag, 774);
+        restored.set_cookie_file(Some(dir.0.join("cookies-b")), Some("account-b".into()));
+        assert!(restored.cached("song").is_none());
+        restored.set_cookie_file(None, None);
+        assert!(restored.cached("song").is_none());
+    }
+
+    #[test]
+    fn reconnecting_same_account_preserves_flights_but_switching_invalidates_them() {
+        let dir = Scratch::new();
+        let resolver = Resolver::new(dir.0.clone());
+        resolver.set_cookie_file(Some(dir.0.join("first")), Some("account-a".into()));
+        let flight = Arc::new(Flight {
+            result: watch::Sender::new(None),
+            waiters: AtomicUsize::new(1),
+            cancellable: AtomicBool::new(true),
+            abort: Mutex::default(),
+        });
+        resolver
+            .flights
+            .lock()
+            .unwrap()
+            .insert("song".into(), flight.clone());
+        let generation = resolver.cookies.lock().unwrap().generation;
+        resolver.set_cookie_file(Some(dir.0.join("refreshed")), Some("account-a".into()));
+        assert_eq!(resolver.cookies.lock().unwrap().generation, generation);
+        assert!(flight.result.borrow().is_none());
+        resolver.set_cookie_file(Some(dir.0.join("other")), Some("account-b".into()));
+        assert!(flight.result.borrow().as_ref().unwrap().is_err());
+        assert!(resolver.flights.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_unscoped_cache_and_nearly_expired_urls_are_rejected() {
+        let dir = Scratch::new();
+        let legacy = serde_json::json!({ "song": { "itag":774, "url":"https://example.invalid", "user_agent":null, "expires":now()+3600, "signed_in":true } });
+        std::fs::write(dir.0.join("streams.json"), legacy.to_string()).unwrap();
+        let resolver = Resolver::new(dir.0.clone());
+        assert!(resolver.cached("song").is_none());
+        let mut expiring = stream();
+        expiring.expires = now() + MARGIN;
+        resolver.store("song", &expiring, None);
+        assert!(resolver.cached("song").is_none());
+    }
+
+    #[cfg(feature = "menubar")]
+    #[test]
+    fn restored_and_live_url_caches_are_bounded() {
+        let dir = Scratch::new();
+        let resolver = Resolver::new(dir.0.clone());
+        for i in 0..40 {
+            resolver.store(&format!("song-{i}"), &stream(), None);
+        }
+        assert_eq!(resolver.cache.lock().unwrap().streams.len(), 32);
+        resolver.save();
+        assert_eq!(
+            Resolver::new(dir.0.clone())
+                .cache
+                .lock()
+                .unwrap()
+                .streams
+                .len(),
+            32
+        );
     }
 }

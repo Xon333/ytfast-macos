@@ -4,7 +4,7 @@
 //! authorization, as music.youtube.com itself does. Without a session the
 //! same requests browse the public catalogue.
 
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -57,7 +57,13 @@ pub struct Stream {
 
 pub struct Client {
     http: reqwest::Client,
-    session: RwLock<Option<Session>>,
+    session: RwLock<SessionState>,
+}
+
+#[derive(Clone, Default)]
+struct SessionState {
+    epoch: u64,
+    session: Option<Arc<Session>>,
 }
 
 impl Default for Client {
@@ -77,7 +83,7 @@ impl Client {
             .expect("the HTTP client builds");
         Self {
             http,
-            session: RwLock::new(None),
+            session: RwLock::default(),
         }
     }
 
@@ -86,16 +92,50 @@ impl Client {
     }
 
     pub fn set_session(&self, session: Option<Session>) {
-        *self.session.write().expect("session lock") = session;
+        let mut state = self.session.write().expect("session lock");
+        state.epoch = state.epoch.wrapping_add(1);
+        state.session = session.map(Arc::new);
     }
 
     pub fn signed_in(&self) -> bool {
-        self.session.read().expect("session lock").is_some()
+        self.session.read().expect("session lock").session.is_some()
+    }
+
+    /// Freeze the account for an asynchronous operation while reusing the
+    /// connection pool. A queued write must never pick up another account.
+    pub fn snapshot(&self) -> Self {
+        Self {
+            http: self.http.clone(),
+            session: RwLock::new(self.session.read().expect("session lock").clone()),
+        }
+    }
+
+    pub fn session_epoch(&self) -> u64 {
+        self.session.read().expect("session lock").epoch
+    }
+
+    /// Publish a reply only while its account is still current. Holding the
+    /// read lock through publication orders it before a subsequent account reset.
+    pub fn if_current(&self, epoch: u64, publish: impl FnOnce()) {
+        let state = self.session.read().expect("session lock");
+        if state.epoch == epoch {
+            publish();
+        }
+    }
+
+    /// Opaque session identity for account-private cache entries.
+    pub fn cache_scope(&self) -> Option<String> {
+        self.session
+            .read()
+            .expect("session lock")
+            .session
+            .as_ref()
+            .map(|session| session.cache_scope())
     }
 
     fn auth_headers(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        let session = self.session.read().expect("session lock");
-        let Some(session) = session.as_ref() else {
+        let state = self.session.read().expect("session lock");
+        let Some(session) = state.session.as_ref() else {
             return request;
         };
         let mut request = request
