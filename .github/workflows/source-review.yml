@@ -1,0 +1,20 @@
+name: Source review snapshot
+on:
+  push:
+    branches: [refine/native-polish]
+    paths: [.github/workflows/source-review.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: git archive --format=zip HEAD -o /tmp/ytfast-source.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-review
+          path: /tmp/ytfast-source.zip
+          retention-days: 1
