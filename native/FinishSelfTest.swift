@@ -35,7 +35,7 @@ func finishSelfTest() {
         button.performClick(nil)
         precondition(controller.popover.isShown, "next activation must reopen")
     }
-    precondition(api.sent.dropFirst(before).allSatisfy { $0["op"] as? String == "browse" }, "panel toggles must not dispatch playback or account writes")
+    precondition(api.sent.dropFirst(before).allSatisfy { $0["op"] as? String == "collapse" }, "panel toggles must not dispatch playback or account writes")
     let window = panel.view.window!
     controller.dismissal.mouseDown(at: NSPoint(x: window.frame.midX, y: window.frame.midY), in: window)
     precondition(controller.popover.isShown, "inside click must preserve the panel")
@@ -62,7 +62,7 @@ func finishSelfTest() {
     lightHost.contentView = panel.view
     precondition(panel.view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua, "product must stay dark under a light host")
     precondition(panel.seek.trackFillColor == NativeTheme.accent && panel.volume.trackFillColor == NativeTheme.accent)
-    precondition(panel.playButton.baseColor == NativeTheme.base, "primary glyph must contrast with lavender fill")
+    precondition(panel.playButton.baseColor == NativeTheme.base, "primary glyph must contrast with the Oxocarbon accent")
     lightHost.contentView = nil; lightHost.orderOut(nil)
     controller.dismissal.stop()
     NSStatusBar.system.removeStatusItem(controller.status)

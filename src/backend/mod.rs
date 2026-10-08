@@ -70,6 +70,12 @@ pub enum Command {
     },
     /// Play a song radio, playlist, album or mix through watch-next.
     PlayTarget(Target),
+    /// Native selection context travels with the same authoritative queue.
+    PlayNative {
+        target: Target,
+        source: Option<String>,
+        collection: bool,
+    },
     TogglePause,
     Next,
     Previous,
@@ -320,7 +326,7 @@ enum Internal {
     Queue {
         epoch: u64,
         result: Result<WatchNext, String>,
-        preparation: playback::Preparation,
+        preparation: Box<playback::Preparation>,
     },
     /// More queue: a long playlist's next page, or the autoplay radio.
     Extended {
@@ -427,7 +433,7 @@ struct Worker {
     /// Fetching a chosen playlist/radio and its continuations.
     queue_request: Option<tokio::task::AbortHandle>,
     /// Retained when loading is cancelled so Play retries the selected list.
-    pending_target: Option<Target>,
+    pending_selection: Option<playback::Selection>,
     /// Until mpv reports playback-restart for the selected entry.
     starting: bool,
     buffering: bool,
@@ -502,7 +508,7 @@ impl Worker {
             prefetching: None,
             ready_next: None,
             queue_request: None,
-            pending_target: None,
+            pending_selection: None,
             starting: false,
             buffering: false,
             seeking: false,
@@ -630,12 +636,20 @@ impl Worker {
                     return;
                 }
                 self.new_epoch();
+                self.state.source = None;
                 self.set_queue(tracks, start);
                 if let Some(pos) = self.pos {
                     self.start(pos).await;
                 }
             }
             Command::PlayTarget(target) => self.play_target(target).await,
+            Command::PlayNative {
+                target,
+                source,
+                collection,
+            } => {
+                self.play_selection(target, source, collection).await;
+            }
             Command::TogglePause => self.toggle_pause().await,
             Command::Next => self.next(false).await,
             Command::Previous => {

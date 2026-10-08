@@ -15,7 +15,7 @@ struct Page: Codable, Equatable {
 struct State: Codable {
     var track: Song?; var playing = false; var loading = false
     var position = 0.0; var duration = 0.0; var volume = 70.0; var shuffle = false; var normalize = true
-    var format: String?; var signed_in = false; var account_checking = true; var account_unverified = false
+    var format: String?; var source: String?; var signed_in = false; var account_checking = true; var account_unverified = false
     var account = "Connecting…"; var profiles: [Profile] = []; var profile: String?
     var pages: [Page]?; var notice: String?; var error: String?
     var adding = false; var show = false; var quit = false
@@ -58,6 +58,11 @@ struct Location {
     // was typed. Neither transport updates nor debounce may rewrite that draft.
     var query = ""
     var searchText = ""
+    var isSearch: Bool { key.hasPrefix("search:") }
+    static func search() -> Location {
+        let target = encodeTarget("Search", ["query": "", "params": NSNull()])
+        return Location(target: target, key: "search::", title: "Search")
+    }
     var libraryIndex: Int? {
         (0..<3).first { Location.library($0).key == key }
     }

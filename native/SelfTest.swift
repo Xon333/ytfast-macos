@@ -46,8 +46,13 @@ func selfTest() {
     panel.sizeChanged = { [weak window] size in window?.setContentSize(size) }
     window.contentView = panel.view; window.appearance = NSAppearance(named: .darkAqua)
     window.makeKeyAndOrderFront(nil); panel.opened(); panel.view.layoutSubtreeIfNeeded()
-    // NSButton.performClick runs AppKit's event loop. Drain the connection's
-    // already-queued playlist warm-up before measuring this particular action.
+    let compactHeight = panel.preferredContentSize.height
+    verify(!panel.browserExpanded && panel.search.isHidden && panel.rows.isEmpty, "startup must be compact")
+    verify(!api.sent.contains { $0["op"] as? String == "browse" }, "compact startup must not fetch the library")
+    verify(compactHeight == 196, "compact player must be 196 points tall")
+    panel.navigate(.library(0), remember: false)
+    // NSButton.performClick runs AppKit's event loop. Drain startup callbacks
+    // before measuring this particular action.
     // The barrier stops this one run-loop turn; it does not sleep or poll.
     var startupSettled = false
     onMainRunLoop { startupSettled = true; CFRunLoopStop(CFRunLoopGetMain()) }
@@ -67,7 +72,7 @@ func selfTest() {
     panel.navigate(Location.from(nestedFixture.target, title: nestedFixture.title)!)
     let collectionHeight = panel.preferredContentSize.height
     verify(collectionHeight == playerLibraryHeight, "collection navigation must replace the sections row instead of adding another row")
-    verify(panel.sections.isHidden && !panel.pagePlay.isHidden, "collection navigation at \(panel.location.key): sectionsHidden=\(panel.sections.isHidden), playHidden=\(panel.pagePlay.isHidden), pageHasPlay=\(panel.pages[panel.location.key]?.play != nil)")
+    verify(!panel.sections.isHidden && !panel.pagePlay.isHidden, "collection navigation at \(panel.location.key): sectionsHidden=\(panel.sections.isHidden), playHidden=\(panel.pagePlay.isHidden), pageHasPlay=\(panel.pages[panel.location.key]?.play != nil)")
     panel.back(nil); api.state.pages = [fixture]; controller.refresh()
     verify(panel.makeMoreMenu().items.first?.state == .on)
     panel.toggleNormalization(nil)
@@ -137,6 +142,7 @@ func selfTest() {
     api.state.signed_in = true; api.state.account_checking = false
     api.state.account = "Demo · Chrome"; api.state.pages = [fixture]
     controller.refresh(); panel.navigate(.library(0), remember: false)
+    panel.closed(); panel.opened()
     let warmReloads = panel.reloadCount
     let warmBegan = CFAbsoluteTimeGetCurrent()
     for _ in 0..<30 { panel.closed(); panel.opened() }
@@ -152,7 +158,7 @@ func selfTest() {
     let album = Location.from(browseTarget("MPREfixture"), title: "An album")!
     panel.navigate(album)
     panel.closed(); panel.opened()
-    verify(panel.location.key == album.key, "reopening a search destination must not rerun the old query")
+    verify(panel.location.key == album.key && !panel.browserExpanded, "reopening must retain but collapse the destination without rerunning its query")
     verify(panel.sections.selectedSegment == -1, "search descendants must not claim to be a library section")
     panel.back(nil)
     verify(panel.location.key == searchLocation.key && panel.search.stringValue == "find album", "Back restores the query")
@@ -200,6 +206,7 @@ func selfTest() {
     panel.back(nil)
     api.state.signed_in = false; api.state.pages = []; controller.refresh()
     api.state.signed_in = true; api.state.pages = [fixture]; controller.refresh()
+    panel.navigate(.library(0), remember: false)
     let requestsBeforeStaleAction = api.sent.count
     panel.rowMenuAction(staleRowAction)
     verify(api.sent.count == requestsBeforeStaleAction, "a context-menu action must not survive an account boundary")
@@ -212,7 +219,7 @@ func selfTest() {
     api.state.track = nil; api.state.pages = nil; controller.refresh()
     let idleHeight = panel.preferredContentSize.height
     api.state.loading = true; controller.refresh()
-    verify(!panel.playButton.isHidden && panel.preferredContentSize.height > idleHeight, "a first-ever pending start must expose Cancel")
+    verify(!panel.playButton.isHidden && panel.playButton.isEnabled && panel.preferredContentSize.height == idleHeight, "a first-ever pending start must expose Cancel without a layout jump")
     api.state.loading = false; controller.refresh()
 
     // Drive text changes synchronously; no sleeps or assumptions about the
@@ -225,7 +232,7 @@ func selfTest() {
     func libraryRoot() {
         window.makeFirstResponder(panel.table)
         api.state.pages = [fixture]; controller.refresh()
-        panel.sections.selectedSegment = 0; panel.changeSection(panel.sections)
+        panel.navigate(.library(0), remember: false)
     }
     func searchPage(_ location: Location, rows: [Row] = [], loading: Bool = false) -> Page {
         Page(key: location.key, target: location.target, title: "Search", rows: rows, loading: loading, more: false)
@@ -233,6 +240,7 @@ func selfTest() {
     api.state.track = Song(id: "abcdefghijk", title: "Night Drive", artist: "YTfast demo")
     api.state.playing = true; api.state.duration = 240; api.state.position = 62
     libraryRoot()
+    panel.focusSearch()
     let searchHeight = panel.preferredContentSize.height
     let beforeTyping = browseCount()
     var draft = ""
@@ -294,8 +302,9 @@ func selfTest() {
     let writesBeforeSearch = api.sent.filter { $0["op"] as? String == "add" }.count
     panel.addSong(nil); verify(panel.location.song != nil && panel.search.isHidden)
     panel.focusSearch()
-    verify(panel.location.key == likedLocation.key && panel.location.song == nil && !panel.search.isHidden && panel.search.currentEditor() != nil, "Command-F must restore browsing and focus visible search from Add")
+    verify(panel.location.isSearch && panel.location.song == nil && !panel.search.isHidden && panel.search.currentEditor() != nil, "Command-F must restore browsing and focus visible search from Add")
     verify(api.sent.filter { $0["op"] as? String == "add" }.count == writesBeforeSearch, "leaving Add for search must not write account data")
+    panel.navigate(likedLocation, remember: false)
     panel.view.layoutSubtreeIfNeeded()
     let availableCell = panel.table.view(atColumn: 0, row: 0, makeIfNecessary: true) as! MusicCell
     availableCell.showActions(true)
@@ -339,9 +348,20 @@ func selfTest() {
         api.state.track = Song(id: "abcdefghijk", title: "Night Drive", artist: "YTfast demo")
         api.state.playing = true; api.state.position = 62; api.state.volume = 70
         api.state.format = "Opus 256 kbps · Premium (itag 774)"; controller.refresh()
+        api.state.source = "Late nights"; controller.refresh()
+        panel.collapseBrowser()
+        capture("compact-dark.png", appearance: .darkAqua)
+        api.state.shuffle = true; controller.refresh()
+        capture("compact-shuffle-dark.png", appearance: .darkAqua)
+        verify(panel.shuffleButton.title == "Shuffle On" && panel.shuffleButton.isOn)
+        api.state.shuffle = false; controller.refresh()
+        verify(panel.preferredContentSize.height == compactHeight && panel.sourceLabel.stringValue == "Late nights")
+        verify(panel.makeMoreMenu().items.contains { $0.title.contains("Opus") }, "quality belongs in More")
+        verify(panel.pages.isEmpty && panel.rows.isEmpty, "compact mode must release the native catalogue")
+        panel.navigate(.library(0), remember: false)
         capture("player-dark.png", appearance: .darkAqua)
         capture("player-light.png", appearance: .aqua)
-        verify(panel.sections.frame.width >= 280, "root library sections must fill the available row; actual width \(panel.sections.frame.width) pt")
+        verify(panel.sections.frame.width >= 220, "compact library launchers must fill their available row; actual width \(panel.sections.frame.width) pt")
         panel.table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         capture("player-actions-dark.png", appearance: .darkAqua)
         panel.table.deselectAll(nil)
@@ -351,9 +371,9 @@ func selfTest() {
         api.state.pages = [fixture, Page(key: "browse:VLPLowned:", target: browseTarget("VLPLowned"), title: "Late nights", rows: (0..<8).map { Row(title: "Song \($0 + 1)", subtitle: "Artist name", play: songTarget, video: "fixture\($0)") }, play: songTarget, loading: false, more: false)]
         controller.refresh(); panel.navigate(Location.from(browseTarget("VLPLowned"), title: "Late nights")!)
         capture("playlist-dark.png", appearance: .darkAqua)
-        verify(panel.sections.isHidden && !panel.pagePlay.isHidden, "nested navigation must keep collection playback accessible")
+        verify(!panel.sections.isHidden && !panel.pagePlay.isHidden, "nested navigation must keep collection playback accessible")
         verify(panel.reconnectButton.frame.height == 28 && panel.reconnectButton.frame.width >= 100, "Connect needs a clear native hit area")
-        for control in [panel.playButton, panel.previousButton, panel.nextButton, panel.shuffleButton, panel.addButton] {
+        for control in [panel.playButton, panel.previousButton, panel.nextButton, panel.shuffleButton, panel.addButton] as [NSButton] {
             let frame = control.convert(control.bounds, to: panel.view)
             verify(panel.view.bounds.contains(frame) && frame.width >= 28 && frame.height >= 28, "transport hit areas must be visible and usable")
         }
@@ -373,8 +393,33 @@ func selfTest() {
         api.state.pages = [fixture, searchPage(visualSearch)]; controller.refresh()
         capture("search-empty-dark.png", appearance: .darkAqua)
     }
+    api.state.pages = [fixture]; api.state.track = nil; api.state.shuffle = false; controller.refresh()
+    verify(panel.shuffleButton.isEnabled && panel.shuffleButton.title == "Shuffle Off", "shuffle must be understandable before first playback")
+    api.state.shuffle = true; controller.refresh()
+    verify(panel.shuffleButton.title == "Shuffle On" && panel.shuffleButton.isOn)
+    panel.navigate(.library(0), remember: false)
+    let shuffleCell = panel.table.view(atColumn: 0, row: 0, makeIfNecessary: true) as! MusicCell
+    verify(shuffleCell.playActionButton.toolTip == "Shuffle Late nights", "collection Play must expose the global shuffle mode")
+    shuffleCell.playActionButton.performClick(nil)
+    verify(api.last("play")?["source"] as? String == "Late nights", "playback must carry its collection context")
+    panel.sections.selectedSegment = 0; panel.changeSection(panel.sections)
+    verify(!panel.browserExpanded, "pressing the selected root launcher must collapse it")
+    panel.sections.selectedSegment = 0; panel.changeSection(panel.sections)
+    verify(panel.browserExpanded && panel.rows.count == fixture.rows.count, "the same launcher must re-expand from the backend cache")
+    let expandedMemory = memorySample()
+    api.state.pages = nil
+    panel.closed(); panel.opened()
+    let idleRequests = api.sent.count
+    for _ in 0..<20 { panel.closed(); panel.opened() }
+    verify(api.sent.dropFirst(idleRequests).allSatisfy { $0["op"] as? String == "collapse" }, "compact cycles must not trigger browsing or playback")
+    verify(panel.rows.isEmpty && panel.pages.isEmpty && controller.state.pages == nil, "closed catalogue must have no second native owner")
+    let circle = SymbolButton("play.fill", "Play", primary: true)
+    circle.frame = NSRect(x: 0, y: 0, width: 40, height: 48)
+    verify(circle.circleBounds.width == circle.circleBounds.height && circle.circleBounds.midX == circle.bounds.midX && circle.circleBounds.midY == circle.bounds.midY, "primary fill must stay circular despite macOS alignment-inset differences")
     panel.closed(); window.orderOut(nil)
-    let result: [String: Any] = ["result": "pass", "checks": ["prelaunch_wake", "one_status_item", "native_popover", "shuffle", "seek", "editable_only", "captured_song", "1000_scrollable_rows", "visible_cell_reuse", "refresh_preserves_content", "loading_can_pause", "search_dedup", "stale_result_navigation", "signed_out_gating", "actionable_signin", "reconnect_progress", "connecting_transport_gating", "single_profile_label", "missing_profile_not_substituted", "first_load_exposes_cancel", "warm_open_no_reload", "position_ticks_no_reload", "reopen_preserves_destination", "back_restores_search", "search_section_state", "selection_is_not_playback", "seek_tracking_stability", "seek_accounting_for_track_change", "volume_tracking_stability", "mute_restores_volume", "current_song_uses_transport", "inline_account", "search_focus_from_account", "control_hit_areas", "search_descendant_section_state", "library_section_sizing", "connect_hit_area", "inline_collection_play", "single_collection_navigation_row", "normalization_state_dispatch", "row_add_captures_song", "stale_row_action_account_boundary", "search_tab_navigation", "search_preserves_typed_spaces", "search_loading_viewport_stable", "search_history_preserves_draft", "marked_text_not_submitted", "marked_text_survives_snapshot", "search_back_resumes_debounce", "search_focus_resumes_debounce", "search_exits_add_without_write", "row_availability_without_reload", "reused_button_hover_reset"], "warm_open_ms": warmOpenMilliseconds, "warm_open_reloads": warmReloadDelta, "render_1000_rows_ms": renderMilliseconds, "instantiated_rows": liveRows, "player_library_height_pt": playerLibraryHeight, "collection_height_pt": collectionHeight]
+    let result: [String: Any] = ["result": "pass", "checks": ["prelaunch_wake", "one_status_item", "native_popover", "shuffle", "seek", "editable_only", "captured_song", "1000_scrollable_rows", "visible_cell_reuse", "refresh_preserves_content", "loading_can_pause", "search_dedup", "stale_result_navigation", "signed_out_gating", "actionable_signin", "reconnect_progress", "connecting_transport_gating", "single_profile_label", "missing_profile_not_substituted", "first_load_exposes_cancel", "warm_open_no_reload", "position_ticks_no_reload", "reopen_preserves_destination", "back_restores_search", "search_section_state", "selection_is_not_playback", "seek_tracking_stability", "seek_accounting_for_track_change", "volume_tracking_stability", "mute_restores_volume", "current_song_uses_transport", "inline_account", "search_focus_from_account", "control_hit_areas", "search_descendant_section_state", "library_section_sizing", "connect_hit_area", "inline_collection_play", "single_collection_navigation_row", "normalization_state_dispatch", "row_add_captures_song", "stale_row_action_account_boundary", "search_tab_navigation", "search_preserves_typed_spaces", "search_loading_viewport_stable", "search_history_preserves_draft", "marked_text_not_submitted", "marked_text_survives_snapshot", "search_back_resumes_debounce", "search_focus_resumes_debounce", "search_exits_add_without_write", "row_availability_without_reload", "reused_button_hover_reset"], "warm_open_ms": warmOpenMilliseconds, "warm_open_reloads": warmReloadDelta, "render_1000_rows_ms": renderMilliseconds, "instantiated_rows": liveRows, "player_library_height_pt": playerLibraryHeight, "collection_height_pt": collectionHeight, "compact_height_pt": compactHeight,
+        "expanded_fixture_memory": expandedMemory, "collapsed_fixture_memory": memorySample(),
+        "compact_checks": ["compact_initial_no_browse", "close_reopen_collapses", "active_page_release", "one_snapshot_owner", "launcher_toggle", "quality_in_more", "source_context_dispatch", "shuffle_before_playback", "shuffle_visible_mode", "round_primary_fill"]]
     print(String(decoding: try! JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]), as: UTF8.self))
     NSStatusBar.system.removeStatusItem(controller.status)
 }

@@ -15,6 +15,8 @@ use super::*;
 #[derive(Serialize, Deserialize)]
 struct Saved {
     queue: queue::Snapshot,
+    #[serde(default)]
+    source: Option<String>,
     /// The current song's position in the play order.
     index: Option<usize>,
     /// Seconds into it.
@@ -52,6 +54,7 @@ impl super::Worker {
         };
         let saved = Saved {
             queue: self.queue.snapshot(),
+            source: self.state.source.clone(),
             index: self.pos,
             position,
             volume: self.state.volume,
@@ -96,6 +99,7 @@ impl super::Worker {
             && !queue.is_empty()
         {
             self.queue = queue;
+            self.state.source = saved.source;
             self.decks.radio = saved.radio;
             self.decks.autoplay = saved
                 .autoplayed

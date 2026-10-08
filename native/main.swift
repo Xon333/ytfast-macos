@@ -63,17 +63,17 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         dismissal = PopoverDismissal(popover: popover, button: status.button!)
         if !testing { installApplicationMenu() }
     }
-    func send(_ action: [String: Any]) { if let next = api.send(action) { apply(next) } }
+    func send(_ action: [String: Any]) { guard !shuttingDown else { return }; if let next = api.send(action) { apply(next) } }
     func refresh() {
         guard status != nil, !shuttingDown, !refreshBusy else { return }
         refreshBusy = true; defer { refreshBusy = false }
         send(["op": "poll"])
     }
     func apply(_ next: State) {
-        state = next; panel.apply(next)
+        state = next; state.pages = nil; panel.apply(next)
         status.button?.toolTip = next.track.map { "\($0.title) · \($0.artist)" } ?? "YTfast"
         if !testing { updateNowPlaying() }
-        if next.quit && !testing { popover.close(); NSApplication.shared.terminate(nil) }
+        if next.quit && !testing { shuttingDown = true; popover.close(); NSApplication.shared.terminate(nil) }
         else if next.show && !testing { onMainRunLoop { [weak self] in self?.showPopover() } }
     }
     @objc func togglePopover(_ sender: Any?) {
