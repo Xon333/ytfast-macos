@@ -23,7 +23,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
-use crate::innertube::Stream;
+use crate::innertube::{AudioFormat, Stream};
 
 /// Runs at once for playback: a click can start while the song before it
 /// still resolves.
@@ -33,6 +33,21 @@ const SPECULATIVE_SLOTS: usize = 2;
 const BACKLOG: usize = 8;
 /// A cached URL is used until this many seconds before it expires.
 const MARGIN: u64 = 600;
+/// Use yt-dlp's audio ranking, including Premium, language/client suffixes and
+/// future format IDs. Preserve the original/default language before quality.
+/// A DASH fragment list is not a playable URL; mpv can take HTTPS or HLS here.
+const AUDIO_FORMAT: &str = "bestaudio[protocol~='^(https?|m3u8(_native)?)$']";
+/// YouTube marks Premium as higher quality and reduces the quality of DRC
+/// variants. Keep its source preference (damaged/missing-token protection),
+/// then prefer Opus and the better bitrate/sample rate within the same tier.
+const AUDIO_SORT: &str = "lang,quality,source,acodec,abr,asr";
+/// Print only the chosen audio's metadata and User-Agent, never cookie headers.
+const AUDIO_OUTPUT: &str = "%(.{format_id,url,acodec,abr,asr,audio_channels,vcodec,protocol})j\t%(ytfast_user_agent_json|NA)s";
+/// A hyphen in an output-template field is arithmetic, so the old
+/// `http_headers.User-Agent` silently produced NA. Select just this header via
+/// yt-dlp's metadata parser without writing any other header to the pipe.
+const AUDIO_AGENT: &str =
+    r#"video:%(http_headers)j:"User-Agent"\s*:\s*(?P<ytfast_user_agent_json>"(?:\\.|[^"\\])*")"#;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Cached {
@@ -40,6 +55,8 @@ struct Cached {
     url: String,
     user_agent: Option<String>,
     expires: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    audio: Option<AudioFormat>,
 }
 
 impl Cached {
@@ -49,6 +66,7 @@ impl Cached {
             url: self.url.clone(),
             user_agent: self.user_agent.clone(),
             expires: self.expires,
+            audio: self.audio.clone(),
         }
     }
 }
@@ -103,15 +121,126 @@ pub fn now() -> u64 {
 
 pub fn describe(itag: u32) -> String {
     match itag {
-        774 => "Opus 256 kbps · Premium (itag 774)".into(),
-        141 => "AAC 256 kbps · Premium (itag 141)".into(),
-        251 => "Opus 160 kbps (itag 251)".into(),
-        140 => "AAC 128 kbps (itag 140)".into(),
-        250 => "Opus 70 kbps (itag 250)".into(),
-        249 => "Opus 50 kbps (itag 249)".into(),
-        139 => "AAC 48 kbps (itag 139)".into(),
+        774 => "Opus · Premium (itag 774)".into(),
+        141 => "AAC · Premium (itag 141)".into(),
+        249..=251 => format!("Opus (itag {itag})"),
+        140 | 139 => format!("AAC (itag {itag})"),
         other => format!("itag {other}"),
     }
+}
+
+impl Stream {
+    /// Accurate source metadata where known, without inventing a fixed VBR rate.
+    pub fn description(&self) -> String {
+        let Some(audio) = &self.audio else {
+            return describe(self.itag);
+        };
+        let codec = match audio.codec.as_deref() {
+            Some("opus") => "Opus",
+            Some(c) if c.starts_with("mp4a") || c == "aac" => "AAC",
+            Some("vorbis") => "Vorbis",
+            Some("flac") => "FLAC",
+            Some(c) => c,
+            None => "Audio",
+        };
+        let mut label = codec.to_owned();
+        if let Some(bitrate) = audio.bitrate_kbps.filter(|b| b.is_finite() && *b > 0.0) {
+            label.push_str(&format!(" · {bitrate:.0} kbps"));
+        }
+        if matches!(self.itag, 774 | 141) {
+            label.push_str(" · Premium");
+        }
+        if audio.format_id.split('-').any(|part| part == "drc") {
+            label.push_str(" · DRC");
+        }
+        let mut details = Vec::new();
+        if let Some(rate) = audio.sample_rate_hz.filter(|r| *r > 0) {
+            let rate = rate as f64 / 1000.0;
+            let precision = usize::from(rate.fract() != 0.0);
+            details.push(format!("{rate:.precision$} kHz"));
+        }
+        if let Some(channels) = audio.channels.filter(|c| *c > 0 && *c != 2) {
+            details.push(format!("{channels} ch"));
+        }
+        details.push(format!("format {}", audio.format_id));
+        label.push_str(&format!(" ({})", details.join("; ")));
+        label
+    }
+}
+
+#[derive(Deserialize)]
+struct ResolvedAudio {
+    format_id: String,
+    url: String,
+    acodec: Option<String>,
+    abr: Option<f64>,
+    asr: Option<f64>,
+    audio_channels: Option<f64>,
+    vcodec: Option<String>,
+    protocol: Option<String>,
+}
+
+/// Validate the subprocess contract before handing a URL to the audio engine.
+/// Keep signed URLs and other subprocess output out of parse-error messages.
+fn parse_audio(stdout: &[u8]) -> Result<Stream> {
+    let stdout = std::str::from_utf8(stdout)
+        .map_err(|_| anyhow!("yt-dlp printed invalid audio metadata"))?;
+    let Some((audio, agent)) = stdout.trim().split_once('\t') else {
+        bail!("yt-dlp printed no stream");
+    };
+    let audio: ResolvedAudio = serde_json::from_str(audio)
+        .map_err(|_| anyhow!("yt-dlp printed invalid audio metadata"))?;
+    let agent: Option<String> = if agent == "NA" {
+        None
+    } else {
+        serde_json::from_str(agent)
+            .map_err(|_| anyhow!("yt-dlp printed invalid request metadata"))?
+    };
+    let url = reqwest::Url::parse(&audio.url)
+        .map_err(|_| anyhow!("yt-dlp returned an invalid audio URL"))?;
+    if !matches!(url.scheme(), "https" | "http")
+        || url.host_str().is_none()
+        || audio.vcodec.as_deref() != Some("none")
+        || audio.acodec.as_deref().is_none_or(|codec| codec == "none")
+        || !matches!(
+            audio.protocol.as_deref(),
+            Some("https" | "http" | "m3u8" | "m3u8_native")
+        )
+    {
+        bail!("yt-dlp did not return a playable audio-only stream");
+    }
+    if audio.format_id.is_empty()
+        || audio.format_id.len() > 128
+        || audio.format_id.chars().any(char::is_control)
+        || agent
+            .as_deref()
+            .is_some_and(|a| a.chars().any(char::is_control))
+    {
+        bail!("yt-dlp printed invalid audio metadata");
+    }
+    let itag = audio
+        .format_id
+        .split('-')
+        .next()
+        .and_then(|id| id.parse().ok())
+        .unwrap_or(0);
+    Ok(Stream {
+        itag,
+        expires: crate::innertube::expiry(&audio.url),
+        url: audio.url,
+        user_agent: agent.filter(|a| !a.is_empty() && a != "NA"),
+        audio: Some(AudioFormat {
+            format_id: audio.format_id,
+            codec: audio.acodec,
+            bitrate_kbps: audio.abr.filter(|b| b.is_finite() && *b > 0.0),
+            sample_rate_hz: audio.asr.and_then(positive_integer),
+            channels: audio.audio_channels.and_then(positive_integer),
+        }),
+    })
+}
+
+fn positive_integer(value: f64) -> Option<u32> {
+    (value > 0.0 && value <= u32::MAX as f64 && value.fract() == 0.0).then_some(value as u32)
 }
 
 /// A resolve asked for: known at once, or a share of a run.
@@ -326,6 +455,7 @@ impl Resolver {
                 url: "http://127.0.0.1:9/ytfast-e2e-broken".into(),
                 user_agent: None,
                 expires: now() + 3600,
+                audio: None,
             }));
         }
         #[cfg(feature = "e2e")]
@@ -562,6 +692,7 @@ impl Resolver {
                 url: stream.url.clone(),
                 user_agent: stream.user_agent.clone(),
                 expires: stream.expires,
+                audio: stream.audio.clone(),
             },
         );
         Self::trim_cache(&mut cache.streams);
@@ -631,15 +762,17 @@ impl Resolver {
             "--no-playlist",
             "--socket-timeout=10",
             "--extractor-retries=1",
+            // The player accepts a complete URL, not DASH fragment recipes.
+            // Keep HLS fallback, webpage, configs and Premium discovery intact.
+            "--extractor-args=youtube:skip=dash",
             "-f",
-            "774/141/251/140/250/249/139",
+            AUDIO_FORMAT,
+            "-S",
+            AUDIO_SORT,
         ]);
         // yt-dlp's own client choice: forcing `web_music` stopped working for
         // this account on 2026-10-01 (it now needs a PO token and yields no audio).
-        command.args([
-            "--print",
-            "%(format_id)s\t%(http_headers.User-Agent)s\t%(url)s",
-        ]);
+        command.args(["--parse-metadata", AUDIO_AGENT, "--print", AUDIO_OUTPUT]);
         if let Some(copy) = &copy {
             command.arg("--cookies").arg(&copy.0);
         }
@@ -662,24 +795,7 @@ impl Resolver {
                 .unwrap_or("yt-dlp failed");
             bail!("{}", line.trim());
         }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut parts = stdout.trim().splitn(3, '\t');
-        let (Some(format), Some(agent), Some(url)) = (parts.next(), parts.next(), parts.next())
-        else {
-            bail!("yt-dlp printed no stream");
-        };
-        let itag = format
-            .split('-')
-            .next()
-            .and_then(|f| f.parse().ok())
-            .unwrap_or(0);
-        let stream = Stream {
-            itag,
-            expires: crate::innertube::expiry(url),
-            url: url.to_owned(),
-            user_agent: (agent != "NA").then(|| agent.to_owned()),
-        };
-        Ok(stream)
+        parse_audio(&output.stdout)
     }
 }
 
@@ -711,6 +827,231 @@ mod tests {
             url: "https://example.invalid/private-stream".into(),
             user_agent: None,
             expires: now() + 3600,
+            audio: None,
+        }
+    }
+
+    fn audio_metadata() -> serde_json::Value {
+        serde_json::json!({
+            "format_id": "774-1", "url": format!("https://example.invalid/audio?expire={}", now() + 3600),
+            "acodec": "opus", "abr": 249.4, "asr": 48000.0, "audio_channels": 2.0,
+            "vcodec": "none", "protocol": "https",
+        })
+    }
+
+    #[test]
+    fn source_quality_metadata_survives_account_scoped_cache_reuse() {
+        let selected =
+            parse_audio(format!("{}\t\"fixture-agent\"\n", audio_metadata()).as_bytes()).unwrap();
+        assert_eq!(selected.itag, 774);
+        assert_eq!(selected.user_agent.as_deref(), Some("fixture-agent"));
+        assert_eq!(
+            selected.description(),
+            "Opus · 249 kbps · Premium (48 kHz; format 774-1)"
+        );
+        let dir = Scratch::new();
+        let resolver = Resolver::new(dir.0.clone());
+        resolver.set_cookie_file(Some(dir.0.join("cookies-a")), Some("account-a".into()));
+        resolver.store("song", &selected, Some("account-a".into()));
+        resolver.save();
+        let restored = Resolver::new(dir.0.clone());
+        assert!(restored.cached("song").is_none());
+        restored.set_cookie_file(Some(dir.0.join("cookies-a-new")), Some("account-a".into()));
+        assert_eq!(
+            restored.cached("song").unwrap().description(),
+            selected.description()
+        );
+        restored.set_cookie_file(Some(dir.0.join("cookies-b")), Some("account-b".into()));
+        assert!(restored.cached("song").is_none());
+    }
+
+    #[test]
+    fn optional_metadata_never_invents_a_fixed_bitrate() {
+        let mut audio = audio_metadata();
+        audio["format_id"] = "251-drc-0".into();
+        audio["abr"] = serde_json::Value::Null;
+        audio["asr"] = 44100.0.into();
+        audio["audio_channels"] = serde_json::Value::Null;
+        let selected = parse_audio(format!("{audio}\tNA").as_bytes()).unwrap();
+        assert_eq!(selected.user_agent, None);
+        assert_eq!(
+            selected.description(),
+            "Opus · DRC (44.1 kHz; format 251-drc-0)"
+        );
+        audio["asr"] = 48000.5.into();
+        assert!(
+            parse_audio(format!("{audio}\tnull").as_bytes())
+                .unwrap()
+                .audio
+                .unwrap()
+                .sample_rate_hz
+                .is_none()
+        );
+        assert_eq!(describe(251), "Opus (itag 251)");
+    }
+
+    #[test]
+    fn subprocess_contract_rejects_video_fragment_recipes_and_private_output() {
+        for (key, value) in [
+            ("vcodec", "h264"),
+            ("acodec", "none"),
+            ("protocol", "http_dash_segments"),
+            ("url", "file:///private/secret"),
+        ] {
+            let mut audio = audio_metadata();
+            audio[key] = value.into();
+            let error = parse_audio(format!("{audio}\tNA").as_bytes())
+                .unwrap_err()
+                .to_string();
+            assert!(!error.contains("secret"));
+        }
+        let error = parse_audio(b"invalid secret payload\tNA")
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("secret"));
+        assert!(
+            parse_audio(format!("{}\t\"agent\\nInjected: secret\"", audio_metadata()).as_bytes())
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn handoff_shares_a_flight_and_only_the_last_waiter_cancels_it() {
+        let dir = Scratch::new();
+        let resolver = Arc::new(Resolver::new(dir.0.clone()));
+        // Keep the process boundary out of this test: exercise real Request and
+        // Waiting ownership around one deliberately pending lookup task.
+        let task = tokio::spawn(std::future::pending::<()>());
+        let flight = Arc::new(Flight {
+            result: watch::Sender::new(None),
+            waiters: AtomicUsize::new(0),
+            cancellable: AtomicBool::new(true),
+            abort: Mutex::new(Some(task.abort_handle())),
+        });
+        resolver
+            .flights
+            .lock()
+            .unwrap()
+            .insert("song".into(), flight.clone());
+        let first = resolver.request("song");
+        let successor = resolver.request("song");
+        assert_eq!(flight.waiters.load(Ordering::SeqCst), 2);
+        drop(first);
+        assert_eq!(flight.waiters.load(Ordering::SeqCst), 1);
+        assert!(!task.is_finished());
+        assert!(resolver.flights.lock().unwrap().contains_key("song"));
+        drop(successor);
+        assert!(!resolver.flights.lock().unwrap().contains_key("song"));
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
+
+    /// Exercises the installed upstream selector and output template, not a
+    /// reimplementation. --simulate + --no-check-formats avoid all networking.
+    #[test]
+    #[ignore = "requires yt-dlp; synthetic format selection only, no account or network"]
+    fn ytdlp_audio_selection_matches_source_quality_and_language() {
+        use serde_json::{Value, json};
+        fn format(id: &str, codec: &str, quality: f64, language: i32, bitrate: f64) -> Value {
+            json!({
+                "format_id": id, "url": format!("https://example.invalid/{id}?expire=9999999999"),
+                "acodec": codec, "vcodec": "none", "quality": quality, "abr": bitrate,
+                "asr": 48000, "audio_channels": 2, "protocol": "https",
+                "source_preference": -1, "language_preference": language,
+                "http_headers": {"User-Agent": "ytfast-fixture", "Cookie": "synthetic-cookie-not-for-output"},
+            })
+        }
+        let standard = || format("251", "opus", 3.0, 5, 150.0);
+        let premium = || format("774-1", "opus", 4.0, 5, 249.4);
+        let aac = || format("141-1", "mp4a.40.2", 4.0, 5, 256.0);
+        let mut dash = premium();
+        dash["protocol"] = "http_dash_segments".into();
+        let mut hls = premium();
+        hls["protocol"] = "m3u8_native".into();
+        let mut video = premium();
+        video["vcodec"] = "h264".into();
+        let cases = [
+            (
+                "Premium Opus suffix",
+                vec![standard(), aac(), premium()],
+                "774-1",
+            ),
+            ("Premium AAC fallback", vec![standard(), aac()], "141-1"),
+            (
+                "original before dubbed Premium",
+                vec![
+                    format("251-0", "opus", 3.0, 10, 150.0),
+                    format("774-2", "opus", 4.0, -1, 270.0),
+                ],
+                "251-0",
+            ),
+            (
+                "default language",
+                vec![premium(), format("774-2", "opus", 4.0, -1, 270.0)],
+                "774-1",
+            ),
+            (
+                "non-DRC",
+                vec![premium(), format("774-drc", "opus", 3.5, 5, 270.0)],
+                "774-1",
+            ),
+            (
+                "new format ID",
+                vec![standard(), format("999-1", "opus", 4.0, 5, 280.0)],
+                "999-1",
+            ),
+            ("complete URL only", vec![standard(), dash, video], "251"),
+            ("HLS audio fallback", vec![hls], "774-1"),
+        ];
+        let dir = Scratch::new();
+        let path = dir.0.join("audio-fixture.info.json");
+        for (case, formats, expected) in cases {
+            let fixture = json!({
+                "id": "fixture", "title": "Synthetic audio", "formats": formats,
+                "http_headers": {"User-Agent": "ytfast-fixture"},
+                "_format_sort_fields": ["quality", "res", "fps", "hdr:12", "source", "vcodec", "channels", "acodec", "lang", "proto"],
+            });
+            crate::paths::write_atomic(&path, &serde_json::to_vec(&fixture).unwrap()).unwrap();
+            let output = std::process::Command::new(crate::platform::tool("yt-dlp"))
+                .args([
+                    "--ignore-config",
+                    "--no-warnings",
+                    "--simulate",
+                    "--no-check-formats",
+                    "-f",
+                    AUDIO_FORMAT,
+                    "-S",
+                    AUDIO_SORT,
+                    "--parse-metadata",
+                    AUDIO_AGENT,
+                    "--print",
+                    AUDIO_OUTPUT,
+                    "--load-info-json",
+                ])
+                .arg(&path)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .expect("yt-dlp is installed for this explicit fixture check");
+            assert!(
+                output.status.success(),
+                "{case}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let selected = parse_audio(&output.stdout).unwrap();
+            assert_eq!(selected.user_agent.as_deref(), Some("ytfast-fixture"));
+            assert!(
+                !String::from_utf8_lossy(&output.stdout)
+                    .contains("synthetic-cookie-not-for-output")
+            );
+            assert!(
+                !String::from_utf8_lossy(&output.stderr)
+                    .contains("synthetic-cookie-not-for-output")
+            );
+            assert_eq!(
+                selected.audio.as_ref().unwrap().format_id,
+                expected,
+                "{case}"
+            );
+            assert!(selected.description().contains("kbps"));
         }
     }
 

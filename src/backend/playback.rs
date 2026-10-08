@@ -5,6 +5,40 @@ pub(super) enum StartError {
     Stream(anyhow::Error),
 }
 
+/// Work a user selection can start before its authoritative queue arrives.
+/// The resolver share and player task stay owned across the queue handoff;
+/// cancelling or replacing that selection drops both without leaving work
+/// running in the background.
+pub(super) struct Preparation {
+    asked: Instant,
+    stream: Option<(String, resolver::Request)>,
+    player: PreparingPlayer,
+}
+
+enum PreparingPlayer {
+    Ready(Arc<Mpv>),
+    Starting(tokio::task::JoinHandle<anyhow::Result<Arc<Mpv>>>),
+}
+
+impl PreparingPlayer {
+    async fn wait(&mut self) -> anyhow::Result<Arc<Mpv>> {
+        match self {
+            Self::Ready(mpv) => Ok(mpv.clone()),
+            Self::Starting(task) => task
+                .await
+                .map_err(|error| anyhow::anyhow!("audio player preparation stopped: {error}"))?,
+        }
+    }
+}
+
+impl Drop for PreparingPlayer {
+    fn drop(&mut self) {
+        if let Self::Starting(task) = self {
+            task.abort();
+        }
+    }
+}
+
 pub(super) struct NextStream {
     id: u64,
     video_id: String,
@@ -95,9 +129,18 @@ impl super::Worker {
         if !self.fresh_playback_allowed() {
             return;
         }
+        // A song target already identifies its stream. Start it and the one
+        // audio player alongside watch-next; neither depends on the queue's
+        // metadata. Take a resolver share before cancelling the prior queue
+        // or next lookup, so another click keeps work already in flight.
+        let video_id = match &target {
+            Target::Watch { video_id, .. } => video_id.as_deref(),
+            _ => None,
+        };
+        let preparation = self.prepare_start(video_id);
         let epoch = self.new_epoch();
-        self.cancel_resolution();
         self.generation += 1;
+        self.cancel_resolution();
         self.current_entry = None;
         self.appended = None;
         self.ready_next = None;
@@ -138,7 +181,11 @@ impl super::Worker {
                 .ok()
                 .and_then(|info| info.continuation.clone());
             let mut total = result.as_ref().map(|info| info.tracks.len()).unwrap_or(0);
-            let _ = tx.send(Internal::Queue { epoch, result });
+            let _ = tx.send(Internal::Queue {
+                epoch,
+                result,
+                preparation,
+            });
             while let Some(t) = token.take().filter(|_| total < 500) {
                 let Ok(value) = client.next_continuation(&t).await else {
                     break;
@@ -360,6 +407,15 @@ impl super::Worker {
 
     /// Starts the track at `pos`, from `at` seconds in.
     pub(super) async fn start_at(&mut self, pos: usize, at: Option<f64>) {
+        self.start_prepared(pos, at, None).await;
+    }
+
+    async fn start_prepared(
+        &mut self,
+        pos: usize,
+        at: Option<f64>,
+        preparation: Option<Preparation>,
+    ) {
         if !self.fresh_playback_allowed() {
             return;
         }
@@ -370,6 +426,7 @@ impl super::Worker {
             self.new_epoch();
         }
         self.generation += 1;
+        let preparation = preparation.unwrap_or_else(|| self.prepare_start(Some(&track.video_id)));
         self.pos = Some(pos);
         self.queue.reached(pos);
         self.current_entry = None;
@@ -387,7 +444,7 @@ impl super::Worker {
         self.reported = false;
         self.waiting_for_network = false;
         self.resume_at = at;
-        self.asked = Instant::now();
+        self.asked = preparation.asked;
         self.state.index = Some(pos);
         self.state.loading = true;
         self.state.playing = false;
@@ -414,7 +471,7 @@ impl super::Worker {
             }
             keep
         });
-        self.resolve_current(&track.video_id);
+        self.resolve_prepared(&track.video_id, preparation);
         // Start the only next-song lookup alongside the current one. A quick
         // skip shares that same run instead of starting another cold lookup.
         self.prefetch();
@@ -433,27 +490,64 @@ impl super::Worker {
             self.update_transport();
             return;
         }
+        let preparation = self.prepare_start(Some(video_id));
+        self.resolve_prepared(video_id, preparation);
+    }
+
+    fn prepare_start(&self, video_id: Option<&str>) -> Preparation {
+        let asked = Instant::now();
+        let stream = video_id
+            .filter(|id| !id.is_empty())
+            .map(|id| (id.to_owned(), self.resolver.request(id)));
+        let player = match &self.mpv {
+            Some(mpv) => PreparingPlayer::Ready(mpv.clone()),
+            None => {
+                // A retried selection keeps its generation. Its cancelled
+                // child may still be exiting, so each startup owns a socket.
+                let socket = self
+                    .paths
+                    .runtime
+                    .join(format!("mpv-{:016x}.sock", fastrand::u64(..)));
+                let volume = self.main_volume();
+                let events = self.mpv_tx.clone();
+                PreparingPlayer::Starting(tokio::spawn(async move {
+                    Mpv::spawn(&socket, volume, events).await
+                }))
+            }
+        };
+        Preparation {
+            asked,
+            stream,
+            player,
+        }
+    }
+
+    fn resolve_prepared(&mut self, video_id: &str, preparation: Preparation) {
+        if !self.fresh_playback_allowed() {
+            self.starting = false;
+            self.update_transport();
+            return;
+        }
         let generation = self.generation;
-        let request = self.resolver.request(video_id);
+        let Preparation {
+            stream, mut player, ..
+        } = preparation;
+        // watch-next chooses the queue/current item. A target's suggested id
+        // may differ (unavailable song, playlist, mix); its URL must never be
+        // loaded under that other song's metadata.
+        let request = match stream {
+            Some((id, request)) if id == video_id => request,
+            _ => self.resolver.request(video_id),
+        };
         self.starting = true;
         self.state.loading = true;
-        let existing = self.mpv.clone();
-        let socket = self.paths.runtime.join(format!("mpv-{generation}.sock"));
-        let volume = self.main_volume();
-        let events = self.mpv_tx.clone();
         let tx = self.internal_tx.clone();
         let task = tokio::spawn(async move {
             // Process startup and network resolution are independent. Neither
             // blocks transport/queue commands on the worker's event loop.
-            let player = async move {
-                match existing {
-                    Some(mpv) => Ok(mpv),
-                    None => Mpv::spawn(&socket, volume, events).await,
-                }
-            };
             let result = tokio::try_join!(
                 async { request.wait().await.map_err(StartError::Stream) },
-                async { player.await.map_err(StartError::Player) }
+                async { player.wait().await.map_err(StartError::Player) }
             );
             let _ = tx.send(Internal::Started { generation, result });
         });
@@ -736,6 +830,10 @@ impl super::Worker {
                 };
                 match result {
                     Ok((stream, mpv)) => {
+                        log::debug!(
+                            "playback stream/player ready {:.3}s after selection",
+                            self.asked.elapsed().as_secs_f64()
+                        );
                         if self
                             .mpv
                             .as_ref()
@@ -744,16 +842,23 @@ impl super::Worker {
                             self.mpv = Some(mpv.clone());
                             self.apply_loop().await;
                             self.apply_equalizer(&mpv).await;
+                            // Volume may have changed while queue/stream work
+                            // ran and this player was not yet the active one.
+                            self.apply_volumes().await;
                         }
                         self.appended = None;
                         let (options, gain) =
                             self.file_options(&track.video_id, &stream, self.resume_at);
                         match mpv.load(&stream.url, "replace", &options).await {
                             Ok(entry) => {
+                                log::debug!(
+                                    "playback load accepted {:.3}s after selection",
+                                    self.asked.elapsed().as_secs_f64()
+                                );
                                 self.resume_at = None;
                                 self.current_entry = Some(entry);
                                 let _ = mpv.set("pause", json!(false)).await;
-                                self.state.format = Some(resolver::describe(stream.itag));
+                                self.state.format = Some(stream.description());
                                 self.state.gain = gain;
                                 self.emit(true);
                                 if let Some(next) = self.ready_next.take() {
@@ -807,17 +912,25 @@ impl super::Worker {
                 }
                 self.emit(true);
             }
-            Internal::Queue { epoch, result } => {
+            Internal::Queue {
+                epoch,
+                result,
+                preparation,
+            } => {
                 if epoch != self.epoch {
                     return;
                 }
+                log::debug!(
+                    "playback queue ready {:.3}s after selection",
+                    preparation.asked.elapsed().as_secs_f64()
+                );
                 match result {
                     Ok(info) => {
                         self.pending_target = None;
                         let start = info.current;
                         self.set_queue(info.tracks, start);
                         if let Some(pos) = self.pos {
-                            self.start(pos).await;
+                            self.start_prepared(pos, None, Some(preparation)).await;
                         }
                     }
                     Err(error) => {
@@ -970,7 +1083,7 @@ impl super::Worker {
         {
             self.appended = Some(Appended {
                 id,
-                itag: stream.itag,
+                format: stream.description(),
                 entry,
                 gain,
             });
@@ -1065,7 +1178,7 @@ impl super::Worker {
         {
             self.state.duration = duration;
         }
-        self.state.format = Some(resolver::describe(next.itag));
+        self.state.format = Some(next.format);
         self.state.gain = next.gain;
         if let Some(video_id) = track.as_ref().map(|t| t.video_id.as_str())
             && let Some(gain) = self.gain_for(video_id)
@@ -1301,6 +1414,210 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "menubar")]
+    fn fixture_stream(id: &str) -> Stream {
+        Stream {
+            itag: 774,
+            url: format!("https://example.invalid/{id}"),
+            user_agent: None,
+            expires: resolver::now() + 3600,
+            audio: None,
+        }
+    }
+
+    #[cfg(feature = "menubar")]
+    #[tokio::test]
+    async fn queue_handoff_reuses_started_preparation_and_the_original_selection_clock() {
+        let (mut worker, _dir) = worker();
+        // Optional metadata is already known, so this test never contacts an
+        // account or network. The IPC fixture is the only audio process owner.
+        worker.state.autoplay = false;
+        worker.remember_player("selected".into(), sound::PlayerInfo::default());
+        let (player, mut commands) = Mpv::test_ipc(71);
+        let prepared_player = player.clone();
+        let (started, starting) = tokio::sync::oneshot::channel();
+        let (ready, waiting) = tokio::sync::oneshot::channel();
+        let asked = Instant::now();
+        let preparation = Preparation {
+            asked,
+            stream: Some((
+                "selected".into(),
+                resolver::Request::Ready(Ok(fixture_stream("selected"))),
+            )),
+            player: PreparingPlayer::Starting(tokio::spawn(async move {
+                let _ = started.send(());
+                waiting.await.unwrap();
+                Ok(prepared_player)
+            })),
+        };
+        starting.await.unwrap();
+        worker
+            .internal(Internal::Queue {
+                epoch: worker.epoch,
+                result: Ok(WatchNext {
+                    tracks: vec![track("selected")],
+                    ..Default::default()
+                }),
+                preparation,
+            })
+            .await;
+        assert_eq!(
+            worker.asked, asked,
+            "queue time belongs to click-to-play time"
+        );
+        assert_eq!(worker.current().unwrap().video_id, "selected");
+        assert!(worker.starting);
+        assert!(worker.mpv.is_none(), "a second player must not be started");
+        worker.state.volume = 26.0;
+        ready.send(()).unwrap();
+        let message = tokio::time::timeout(
+            Duration::from_secs(1),
+            worker.internal_rx.as_mut().unwrap().recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let Internal::Started { generation, result } = message else {
+            panic!("expected the prepared stream and player");
+        };
+        let Ok((stream, reused)) = result else {
+            panic!("preparation must succeed without a resolver process");
+        };
+        assert!(Arc::ptr_eq(&player, &reused));
+        assert_eq!(stream.url, fixture_stream("selected").url);
+        worker
+            .internal(Internal::Started {
+                generation,
+                result: Ok((stream, reused)),
+            })
+            .await;
+        let mut loads = Vec::new();
+        let mut volumes = Vec::new();
+        while let Ok(command) = commands.try_recv() {
+            if command[0] == "loadfile" {
+                loads.push(command.clone());
+            }
+            if command[0] == "set_property" && command[1] == "volume" {
+                volumes.push(command[2].clone());
+            }
+        }
+        assert_eq!(loads.len(), 1);
+        assert_eq!(loads[0][1], fixture_stream("selected").url);
+        assert_eq!(volumes, vec![json!(26.0)]);
+    }
+
+    #[cfg(feature = "menubar")]
+    #[tokio::test]
+    async fn authoritative_queue_selection_cannot_adopt_a_different_prepared_stream() {
+        let (mut worker, _dir) = worker();
+        worker.state.autoplay = false;
+        worker.remember_player("actual".into(), sound::PlayerInfo::default());
+        let cached = json!({
+            "scope": null,
+            "streams": { "actual": {
+                "itag": 774,
+                "url": "https://example.invalid/actual",
+                "user_agent": null,
+                "expires": resolver::now() + 3600
+            }}
+        });
+        std::fs::write(
+            worker.paths.runtime.join("streams.json"),
+            cached.to_string(),
+        )
+        .unwrap();
+        worker.resolver = Arc::new(Resolver::new(worker.paths.runtime.clone()));
+        let (player, _commands) = Mpv::test_ipc(71);
+        worker
+            .internal(Internal::Queue {
+                epoch: worker.epoch,
+                result: Ok(WatchNext {
+                    tracks: vec![track("actual")],
+                    ..Default::default()
+                }),
+                preparation: Preparation {
+                    asked: Instant::now(),
+                    stream: Some((
+                        "suggested".into(),
+                        resolver::Request::Ready(Ok(fixture_stream("suggested"))),
+                    )),
+                    player: PreparingPlayer::Ready(player.clone()),
+                },
+            })
+            .await;
+        let message = tokio::time::timeout(
+            Duration::from_secs(1),
+            worker.internal_rx.as_mut().unwrap().recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let Internal::Started {
+            result: Ok((stream, reused)),
+            ..
+        } = message
+        else {
+            panic!("expected a cache-backed current stream");
+        };
+        assert_eq!(stream.url, "https://example.invalid/actual");
+        assert!(Arc::ptr_eq(&player, &reused));
+    }
+
+    #[tokio::test]
+    async fn abandoned_queues_drop_their_player_preparation() {
+        for outcome in ["stale", "failed", "paused", "account-check"] {
+            let (mut worker, _dir) = worker();
+            let (started, starting) = tokio::sync::oneshot::channel();
+            let (released, dropped) = tokio::sync::oneshot::channel();
+            struct Release(Option<tokio::sync::oneshot::Sender<()>>);
+            impl Drop for Release {
+                fn drop(&mut self) {
+                    let _ = self.0.take().unwrap().send(());
+                }
+            }
+            let task = tokio::spawn(async move {
+                let _released = Release(Some(released));
+                let _ = started.send(());
+                std::future::pending::<anyhow::Result<Arc<Mpv>>>().await
+            });
+            starting.await.unwrap();
+            let preparation = Preparation {
+                asked: Instant::now(),
+                stream: None,
+                player: PreparingPlayer::Starting(task),
+            };
+            if matches!(outcome, "stale" | "failed") {
+                worker
+                    .internal(Internal::Queue {
+                        epoch: worker.epoch + u64::from(outcome == "stale"),
+                        result: Err("fixture queue failure".into()),
+                        preparation,
+                    })
+                    .await;
+            } else {
+                // Matches the queue task's ownership when Pause/account check
+                // aborts it before any queue response has been delivered.
+                let request = tokio::spawn(async move {
+                    let _preparation = preparation;
+                    std::future::pending::<()>().await
+                });
+                worker.queue_request = Some(request.abort_handle());
+                worker.starting = true;
+                if outcome == "paused" {
+                    worker.toggle_pause().await;
+                } else {
+                    worker.begin_account_check().await;
+                }
+                assert!(request.await.unwrap_err().is_cancelled());
+            }
+            tokio::time::timeout(Duration::from_secs(1), dropped)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(worker.mpv.is_none());
+        }
+    }
+
     #[tokio::test]
     async fn checking_blocks_new_playback_and_cancels_preparation_without_losing_cached_scope() {
         let (mut worker, _dir) = worker();
@@ -1367,7 +1684,7 @@ mod tests {
         worker.current_entry = Some(1);
         worker.appended = Some(Appended {
             id: worker.queue.id(1).unwrap(),
-            itag: 774,
+            format: resolver::describe(774),
             entry: 2,
             gain: None,
         });
@@ -1411,7 +1728,7 @@ mod tests {
         worker.current_entry = Some(1);
         worker.appended = Some(Appended {
             id: worker.queue.id(1).unwrap(),
-            itag: 774,
+            format: resolver::describe(774),
             entry: 2,
             gain: None,
         });
@@ -1542,6 +1859,7 @@ mod tests {
                 url: "https://example.invalid/next".into(),
                 user_agent: None,
                 expires: resolver::now() + 3600,
+                audio: None,
             },
         };
         worker.queue_next(next).await;

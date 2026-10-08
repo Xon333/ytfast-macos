@@ -13,8 +13,8 @@ struct Page: Codable, Equatable {
 }
 struct State: Codable {
     var track: Song?; var playing = false; var loading = false
-    var position = 0.0; var duration = 0.0; var volume = 70.0; var shuffle = false
-    var format: String?; var signed_in = false; var account_checking = true
+    var position = 0.0; var duration = 0.0; var volume = 70.0; var shuffle = false; var normalize = true
+    var format: String?; var signed_in = false; var account_checking = true; var account_unverified = false
     var account = "Connecting…"; var profiles: [Profile] = []; var profile: String?
     var pages: [Page]?; var notice: String?; var error: String?
     var adding = false; var show = false; var quit = false
@@ -79,9 +79,13 @@ struct Location {
     }
 }
 
-final class ActionBox: NSObject {
-    let value: [String: Any]
-    init(_ value: [String: Any]) { self.value = value }
+final class RowActionBox: NSObject {
+    let row: Row
+    let operation: String
+    let generation: Int
+    init(_ row: Row, operation: String, generation: Int) {
+        self.row = row; self.operation = operation; self.generation = generation
+    }
 }
 
 func setText(_ label: NSTextField, _ value: String) {

@@ -7,6 +7,7 @@
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha1::Digest;
 
@@ -53,6 +54,19 @@ pub struct Stream {
     pub user_agent: Option<String>,
     /// Unix seconds after which the URL stops working.
     pub expires: u64,
+    /// Metadata for the selected source, absent for older cached URLs.
+    pub audio: Option<AudioFormat>,
+}
+
+/// Small, non-sensitive metadata supplied by yt-dlp for the selected audio.
+/// Bitrate is the source's reported average, not a measured network rate.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AudioFormat {
+    pub format_id: String,
+    pub codec: Option<String>,
+    pub bitrate_kbps: Option<f64>,
+    pub sample_rate_hz: Option<u32>,
+    pub channels: Option<u32>,
 }
 
 pub struct Client {

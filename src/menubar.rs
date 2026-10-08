@@ -236,6 +236,9 @@ enum Request {
     Volume {
         value: f64,
     },
+    Normalize {
+        enabled: bool,
+    },
     Seek {
         value: f64,
     },
@@ -374,6 +377,7 @@ impl Core {
                 }
                 self.backend.send(Command::Volume(value.clamp(0.0, 100.0)));
             }
+            Request::Normalize { enabled } => self.backend.send(Command::Normalize(enabled)),
             Request::Seek { value } => {
                 if !value.is_finite() {
                     bail!("Invalid position");
@@ -621,7 +625,9 @@ impl Core {
         });
         json!({"track":track,"playing":pb.playing,"loading":pb.loading,"position":pb.position,
             "duration":pb.duration,"volume":pb.volume,"shuffle":pb.shuffle,"format":pb.format,
+            "normalize":pb.normalize,
             "signed_in":signed_in,"account_checking":matches!(self.account, Account::Checking),
+            "account_unverified":matches!(self.account, Account::Unverified { .. }),
             "account":status,"profile":self.profile,
             "profiles":self.profiles.iter().map(|p|json!({"id":p.id,"label":p.label})).collect::<Vec<_>>(),
             "pages":pages,"notice":self.notice,"error":self.error,"adding":self.pending_add.is_some(),

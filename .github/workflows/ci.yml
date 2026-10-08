@@ -54,6 +54,7 @@ jobs:
         run: |
           ! cargo tree --locked --no-default-features --features menubar -e normal | grep -E '(egui|eframe|wgpu|winit|fastframe-fonts) v'
           cargo test --locked --release --no-default-features --features menubar --lib native_audio_transport -- --ignored --nocapture
+          cargo test --locked --release --no-default-features --features menubar --lib ytdlp_audio_selection_matches_source_quality_and_language -- --ignored --nocapture
           scripts/build-macos.sh
           scripts/smoke-macos.sh
       - if: always() && runner.os == 'macOS'

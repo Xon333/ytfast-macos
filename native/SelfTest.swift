@@ -27,8 +27,9 @@ func selfTest() {
     api.state.profiles = [Profile(id: "chrome:Default", label: "Chrome · Default")]
     api.state.track = Song(id: "abcdefghijk", title: "Night Drive", artist: "YTfast demo")
     api.state.duration = 240; api.state.position = 62; api.state.playing = true; api.state.format = "Opus · 160 kbps"
+    let playlistStart = encodeTarget("Watch", ["video_id": NSNull(), "playlist_id": "PLowned", "params": NSNull()])
     let fixture = Page(key: playlistKey, target: browseTarget(playlistID), title: "Playlists",
-        rows: [Row(title: "Late nights", subtitle: "Playlist · 32 songs", browse: browseTarget("VLPLowned"), editable: "PLowned"),
+        rows: [Row(title: "Late nights", subtitle: "Playlist · 32 songs", play: playlistStart, browse: browseTarget("VLPLowned"), editable: "PLowned"),
                Row(title: "Focus", subtitle: "Playlist · 85 songs", browse: browseTarget("VLPLfocus"), editable: "PLfocus"),
                Row(title: "New discoveries", subtitle: "Playlist · 48 songs", browse: browseTarget("VLPLshared")),
                Row(title: "Weekend rides", subtitle: "Playlist · 64 songs", browse: browseTarget("VLPLrides"), editable: "PLrides")],
@@ -46,6 +47,26 @@ func selfTest() {
     window.contentView = panel.view; window.appearance = NSAppearance(named: .darkAqua)
     window.makeKeyAndOrderFront(nil); panel.opened(); panel.view.layoutSubtreeIfNeeded()
     verify(controller.status.menu == nil && controller.popover.contentViewController === panel)
+    let playerLibraryHeight = panel.preferredContentSize.height
+    let collectionCell = panel.table.view(atColumn: 0, row: 0, makeIfNecessary: true) as! MusicCell
+    collectionCell.showActions(true)
+    let collectionBrowses = api.sent.filter { $0["op"] as? String == "browse" }.count
+    collectionCell.playActionButton.performClick(nil)
+    verify(api.last("play")?["target"] as? String == playlistStart && panel.location.key == playlistKey, "inline playlist Play must not open the collection first")
+    verify(api.sent.filter { $0["op"] as? String == "browse" }.count == collectionBrowses)
+    let nestedFixture = Page(key: "browse:VLPLowned:", target: browseTarget("VLPLowned"), title: "Late nights", rows: fixture.rows, play: playlistStart, loading: false, more: false)
+    api.state.pages = [fixture, nestedFixture]; controller.refresh()
+    panel.navigate(Location.from(nestedFixture.target, title: nestedFixture.title)!)
+    let collectionHeight = panel.preferredContentSize.height
+    verify(collectionHeight == playerLibraryHeight, "collection navigation must replace the sections row instead of adding another row")
+    verify(panel.sections.isHidden && !panel.pagePlay.isHidden)
+    panel.back(nil); api.state.pages = [fixture]; controller.refresh()
+    verify(panel.makeMoreMenu().items.first?.state == .on)
+    panel.toggleNormalization(nil)
+    verify(api.last("normalize")?["enabled"] as? Bool == false)
+    api.state.normalize = false; controller.refresh()
+    verify(panel.makeMoreMenu().items.first?.state == .off)
+    api.state.normalize = true; controller.refresh()
     panel.shuffleButton.performClick(nil)
     verify(api.last("shuffle") != nil)
     panel.seek.doubleValue = 90; panel.seekChanged(panel.seek)
@@ -95,7 +116,7 @@ func selfTest() {
     verify(account.items.contains { $0.title == "Open YouTube Music" && $0.isEnabled })
     verify(panel.reconnectButton.isEnabled)
     api.state.account_checking = true; controller.refresh()
-    verify(!panel.reconnectButton.isEnabled && panel.state.account_checking && panel.reconnectButton.title == "Reconnect")
+    verify(!panel.reconnectButton.isEnabled && panel.state.account_checking && panel.reconnectButton.title == "Connecting…")
     verify(!panel.nextButton.isEnabled && !panel.previousButton.isEnabled)
 
     verify(panel.profilePicker.isHidden, "a single profile is a label, not a disabled picker")
@@ -160,6 +181,23 @@ func selfTest() {
     panel.activateSelectedRow()
     verify(api.sent.filter { $0["op"] as? String == "play" }.count == playsBefore)
     verify(api.last("transport")?["action"] as? String == "toggle")
+    let trackCell = panel.table.view(atColumn: 0, row: 0, makeIfNecessary: true) as! MusicCell
+    trackCell.showActions(true)
+    verify(!trackCell.playActionButton.isHidden && !trackCell.addActionButton.isHidden)
+    let staleRowAction = panel.makeRowMenu(0)!.items.first!
+    trackCell.addActionButton.performClick(nil)
+    verify(panel.location.song?.id == "lmnopqrstuv", "row Add must capture that song")
+    api.state.track = Song(id: "newcurrent01", title: "Playback moved on", artist: "Demo"); controller.refresh()
+    verify(panel.location.song?.id == "lmnopqrstuv", "the captured row song must survive playback advancing")
+    panel.back(nil)
+    api.state.signed_in = false; api.state.pages = []; controller.refresh()
+    api.state.signed_in = true; api.state.pages = [fixture]; controller.refresh()
+    let requestsBeforeStaleAction = api.sent.count
+    panel.rowMenuAction(staleRowAction)
+    verify(api.sent.count == requestsBeforeStaleAction, "a context-menu action must not survive an account boundary")
+    let editor = NSTextView()
+    verify(panel.control(panel.search, textView: editor, doCommandBy: NSSelectorFromString("insertTab:")))
+    verify(window.firstResponder === panel.table, "Tab from search must enter the music list")
     panel.showAccount(nil); verify(panel.showingAccount && panel.search.isHidden)
     panel.focusSearch(); verify(!panel.showingAccount && !panel.search.isHidden)
     verify(PlayerPanel.searchDelay == 0.18)
@@ -189,19 +227,26 @@ func selfTest() {
         capture("connecting-dark.png", appearance: .darkAqua)
         api.state.account_checking = false; api.state.account = "Operation not permitted. Full Disk Access is required."; controller.refresh()
         capture("permission-dark.png", appearance: .darkAqua)
+        api.state.account_unverified = true; api.state.account = "Can't reach YouTube Music (connection timed out)"; controller.refresh()
+        capture("unverified-dark.png", appearance: .darkAqua)
+        api.state.account_unverified = false
         api.state.signed_in = true; api.state.account = "Demo · Chrome"; api.state.pages = [fixture]
         api.state.track = Song(id: "abcdefghijk", title: "Night Drive", artist: "YTfast demo")
         api.state.playing = true; api.state.position = 62; api.state.volume = 70
         api.state.format = "Opus 256 kbps · Premium (itag 774)"; controller.refresh()
         capture("player-dark.png", appearance: .darkAqua)
         capture("player-light.png", appearance: .aqua)
+        verify(panel.sections.frame.width >= 280, "root library sections must fill the available row")
+        panel.table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        capture("player-actions-dark.png", appearance: .darkAqua)
+        panel.table.deselectAll(nil)
         api.state.profiles.append(Profile(id: "brave:Default", label: "Brave · Default")); controller.refresh()
         panel.showAccount(nil); capture("account-dark.png", appearance: .darkAqua)
         panel.showAccount(nil)
         api.state.pages = [fixture, Page(key: "browse:VLPLowned:", target: browseTarget("VLPLowned"), title: "Late nights", rows: (0..<8).map { Row(title: "Song \($0 + 1)", subtitle: "Artist name", play: songTarget, video: "fixture\($0)") }, play: songTarget, loading: false, more: false)]
         controller.refresh(); panel.navigate(Location.from(browseTarget("VLPLowned"), title: "Late nights")!)
         capture("playlist-dark.png", appearance: .darkAqua)
-        verify(panel.sections.frame.width >= 280, "library sections must fill the available row")
+        verify(panel.sections.isHidden && !panel.pagePlay.isHidden, "nested navigation must keep collection playback accessible")
         verify(panel.reconnectButton.frame.height == 28 && panel.reconnectButton.frame.width >= 100, "Connect needs a clear native hit area")
         for control in [panel.playButton, panel.previousButton, panel.nextButton, panel.shuffleButton, panel.addButton] {
             let frame = control.convert(control.bounds, to: panel.view)
@@ -209,7 +254,7 @@ func selfTest() {
         }
     }
     panel.closed(); window.orderOut(nil)
-    let result: [String: Any] = ["result": "pass", "checks": ["prelaunch_wake", "one_status_item", "native_popover", "shuffle", "seek", "editable_only", "captured_song", "1000_scrollable_rows", "visible_cell_reuse", "refresh_preserves_content", "loading_can_pause", "search_dedup", "stale_result_navigation", "signed_out_gating", "actionable_signin", "reconnect_progress", "connecting_transport_gating", "single_profile_label", "missing_profile_not_substituted", "first_load_exposes_cancel", "warm_open_no_reload", "position_ticks_no_reload", "reopen_preserves_destination", "back_restores_search", "search_section_state", "selection_is_not_playback", "seek_tracking_stability", "seek_accounting_for_track_change", "volume_tracking_stability", "mute_restores_volume", "current_song_uses_transport", "inline_account", "search_focus_from_account", "control_hit_areas", "search_descendant_section_state", "library_section_sizing", "connect_hit_area"], "warm_open_ms": warmOpenMilliseconds, "warm_open_reloads": warmReloadDelta, "render_1000_rows_ms": renderMilliseconds, "instantiated_rows": liveRows]
+    let result: [String: Any] = ["result": "pass", "checks": ["prelaunch_wake", "one_status_item", "native_popover", "shuffle", "seek", "editable_only", "captured_song", "1000_scrollable_rows", "visible_cell_reuse", "refresh_preserves_content", "loading_can_pause", "search_dedup", "stale_result_navigation", "signed_out_gating", "actionable_signin", "reconnect_progress", "connecting_transport_gating", "single_profile_label", "missing_profile_not_substituted", "first_load_exposes_cancel", "warm_open_no_reload", "position_ticks_no_reload", "reopen_preserves_destination", "back_restores_search", "search_section_state", "selection_is_not_playback", "seek_tracking_stability", "seek_accounting_for_track_change", "volume_tracking_stability", "mute_restores_volume", "current_song_uses_transport", "inline_account", "search_focus_from_account", "control_hit_areas", "search_descendant_section_state", "library_section_sizing", "connect_hit_area", "inline_collection_play", "single_collection_navigation_row", "normalization_state_dispatch", "row_add_captures_song", "stale_row_action_account_boundary", "search_tab_navigation"], "warm_open_ms": warmOpenMilliseconds, "warm_open_reloads": warmReloadDelta, "render_1000_rows_ms": renderMilliseconds, "instantiated_rows": liveRows, "player_library_height_pt": playerLibraryHeight, "collection_height_pt": collectionHeight]
     print(String(decoding: try! JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]), as: UTF8.self))
     NSStatusBar.system.removeStatusItem(controller.status)
 }

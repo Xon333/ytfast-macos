@@ -375,7 +375,7 @@ impl super::Worker {
                     mpv: deck,
                     next: Appended {
                         id,
-                        itag: stream.itag,
+                        format: stream.description(),
                         entry,
                         gain,
                     },
