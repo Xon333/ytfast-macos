@@ -2,7 +2,7 @@
 
 **A small YouTube Music player in your menu bar.** Native AppKit + Rust, without a WebView, browser player or Dock window.
 
-[**Download 0.5.0 · Apple Silicon**](https://github.com/Xon333/ytfast-macos/actions/runs/37814352878/artifacts/11568240145) · [Verified state](docs/CURRENT.md) · [CI builds](https://github.com/Xon333/ytfast-macos/actions/workflows/ci.yml)
+[Verified state](docs/CURRENT.md) · [CI checks](https://github.com/Xon333/ytfast-macos/actions/workflows/ci.yml)
 
 ## Use
 
@@ -10,22 +10,35 @@ The player opens compact: your song, the playing collection, transport and four 
 
 **Shuffle On / Off** controls the current queue and future collections. It preserves the current song; a collection's Play action becomes Shuffle when enabled and starts at a random loaded song. Explicitly selecting a song still starts that song. Turn shuffle off to restore the collection's order. The mode is available before choosing music.
 
-OLED-black surfaces use [Oxocarbon](https://github.com/nyoom-engineering/oxocarbon.nvim)'s neutral, pink and green tokens, with no blue accents. Play/Pause stays circular. Codec, bitrate and available Premium metadata are in **More (⋯)**, not the player card. The download includes native screenshots with synthetic music data.
+OLED-black surfaces use [Oxocarbon](https://github.com/nyoom-engineering/oxocarbon.nvim)'s neutral, pink and green tokens, with no blue accents. Play/Pause stays circular. Codec, bitrate and available Premium metadata are in **More (⋯)**, not the player card. CI captures use synthetic music data.
 
 **Shortcuts:** `⌘F` search · `⌘R` refresh the expanded view · `Space` play/pause · `Return` activate a selected row · `Esc` back/collapse/close · `⌘Q` quit.
 
-## Install
+## Build from source
 
-**Apple Silicon · macOS 13+**
+**macOS 13+** · Requires [Rust 1.98+](https://rustup.rs/), [Homebrew](https://brew.sh/) and Xcode Command Line Tools (`xcode-select --install` if missing).
 
-1. Install the audio tools, skipping tools already present (mpv **0.41+**):
+1. Install the audio tools (mpv **0.41+**):
 
    ```sh
    brew install mpv yt-dlp deno
    ```
 
-2. Download the build above. GitHub Actions wraps it in an outer ZIP: extract that, then `dist/ytfast-macos-arm64.zip` inside it.
-3. Quit YTfast, move the new `YTfast.app` to **Applications**, replacing the old app, and open it.
+2. Clone and build:
+
+   ```sh
+   git clone https://github.com/Xon333/ytfast-macos.git
+   cd ytfast-macos
+   scripts/build-macos.sh
+   ```
+
+3. Open the locally built app:
+
+   ```sh
+   open dist/YTfast.app
+   ```
+
+To install it in Applications, quit YTfast and copy `dist/YTfast.app` into `/Applications`, replacing any previous version.
 
 The app is ad-hoc signed, not notarized. If macOS blocks it, use **System Settings → Privacy & Security → Open Anyway**.
 
@@ -44,20 +57,6 @@ Direct mpv playback preserves yt-dlp's source-quality and Premium-aware stream s
 Only the expanded library page crosses the native bridge; closing drops its Swift catalogue copy. The Rust cache remains bounded for quick reopening. No artwork, Home feed, lyrics, idle resolver, theme framework or UI polling loop.
 
 **Memory numbers need a named metric.** App RSS, physical footprint, OS AutoFill helpers and the mpv/resolver processes are not interchangeable. A 50 MB target and consistent sub-100 MB real-Mac use are goals, not established guarantees. [Measurements and limits](docs/CURRENT.md).
-
-<details>
-<summary>Build from source</summary>
-
-Requires Rust 1.98+, Xcode Command Line Tools and the audio tools above.
-
-```sh
-scripts/build-macos.sh
-open dist/YTfast.app
-```
-
-Output: `dist/YTfast.app` and `dist/ytfast-macos-<arch>.zip`. The app embeds its exact source revision. See [architecture](docs/MACOS.md) and [contributor guidance](AGENTS.md).
-
-</details>
 
 ---
 
