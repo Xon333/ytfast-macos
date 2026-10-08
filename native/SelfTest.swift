@@ -215,6 +215,103 @@ func selfTest() {
     verify(!panel.playButton.isHidden && panel.preferredContentSize.height > idleHeight, "a first-ever pending start must expose Cancel")
     api.state.loading = false; controller.refresh()
 
+    // Drive text changes synchronously; no sleeps or assumptions about the
+    // debounce clock. Return explicitly submits the final committed draft.
+    func browseCount() -> Int { api.sent.filter { $0["op"] as? String == "browse" }.count }
+    func typeSearch(_ value: String) {
+        panel.search.stringValue = value
+        panel.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: panel.search))
+    }
+    func libraryRoot() {
+        window.makeFirstResponder(panel.table)
+        api.state.pages = [fixture]; controller.refresh()
+        panel.sections.selectedSegment = 0; panel.changeSection(panel.sections)
+    }
+    func searchPage(_ location: Location, rows: [Row] = [], loading: Bool = false) -> Page {
+        Page(key: location.key, target: location.target, title: "Search", rows: rows, loading: loading, more: false)
+    }
+    api.state.track = Song(id: "abcdefghijk", title: "Night Drive", artist: "YTfast demo")
+    api.state.playing = true; api.state.duration = 240; api.state.position = 62
+    libraryRoot()
+    let searchHeight = panel.preferredContentSize.height
+    let beforeTyping = browseCount()
+    var draft = ""
+    for character in "Daft Punk " {
+        draft.append(character); typeSearch(draft)
+        verify(panel.search.stringValue == draft && panel.location.searchText == draft, "typing must retain spaces in the raw search draft")
+        verify(panel.preferredContentSize.height == searchHeight && panel.rows.isEmpty, "pending search must keep its viewport without actionable stale rows")
+    }
+    verify(browseCount() == beforeTyping, "typing must wait for debounce or explicit submission")
+    panel.searchNow(nil)
+    verify(panel.location.query == "Daft Punk" && browseCount() == beforeTyping + 1, "Return submits the normalized final query once")
+    let rawSearchLocation = panel.location
+    let resultRows = (0..<7).map { Row(title: "Result \($0 + 1)", subtitle: "Daft Punk", play: songTarget, video: "fixture\($0)") }
+    for page in [searchPage(rawSearchLocation, loading: true), searchPage(rawSearchLocation, rows: resultRows), searchPage(rawSearchLocation)] {
+        api.state.pages = [fixture, page]; controller.refresh()
+        verify(panel.preferredContentSize.height == searchHeight, "search loading, results and empty states must retain the same viewport")
+        verify(panel.search.stringValue == draft, "page snapshots must not normalize the field editor")
+    }
+    verify(panel.refreshButton.isEnabled && !panel.refreshButton.isHidden, "settled empty results must stop loading")
+    panel.navigate(album); panel.back(nil)
+    verify(panel.search.stringValue == "Daft Punk ", "Back must restore the exact search draft, including spaces")
+
+    // Exercise AppKit's marked-text path without a particular keyboard layout
+    // or input method. Composing text and its editor must survive a snapshot.
+    libraryRoot(); panel.focusSearch()
+    guard let compositionEditor = panel.search.currentEditor() as? NSTextView else { preconditionFailure("search field editor unavailable") }
+    let beforeComposition = browseCount(), composingLocation = panel.location.key
+    compositionEditor.setMarkedText("とう", selectedRange: NSRange(location: 2, length: 0), replacementRange: NSRange(location: 0, length: compositionEditor.string.utf16.count))
+    verify(compositionEditor.hasMarkedText(), "synthetic composition must establish marked text")
+    let composingText = compositionEditor.string
+    panel.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: panel.search))
+    controller.refresh()
+    verify(compositionEditor.hasMarkedText() && compositionEditor.string == composingText, "backend snapshots must preserve active composition")
+    verify(panel.location.key == composingLocation && browseCount() == beforeComposition, "marked text must not navigate or submit a partial search")
+    verify(!panel.control(panel.search, textView: compositionEditor, doCommandBy: NSSelectorFromString("insertNewline:")), "Return belongs to the input method while text is marked")
+    compositionEditor.unmarkText(); typeSearch("東京"); panel.searchNow(nil)
+    verify(panel.location.query == "東京" && browseCount() == beforeComposition + 1, "committed composition must submit once")
+
+    // Account hides/cancels the debounce, but both ways back must resume it.
+    for focus in [false, true] {
+        libraryRoot(); typeSearch(focus ? "resume from focus" : "resume from back")
+        let pendingLocation = panel.location
+        panel.showAccount(nil)
+        verify(panel.showingAccount, "interrupted search fixture must show Account")
+        let beforeResume = browseCount()
+        if focus { panel.focusSearch() } else { panel.back(nil) }
+        verify(!panel.showingAccount && panel.location.key == pendingLocation.key && browseCount() == beforeResume + 1, "leaving Account must resume the pending query exactly once")
+        api.state.pages = [fixture, searchPage(pendingLocation, rows: [resultRows[0]])]; controller.refresh()
+        verify(panel.refreshButton.isEnabled && !panel.refreshButton.isHidden, "resumed search must clear its loading state when results arrive")
+    }
+
+    // Command-F leaves Add without a write; availability changes update the
+    // existing visible buttons even when the song and playback stay unchanged.
+    libraryRoot()
+    let likedLocation = Location.library(1)
+    let likedPage = Page(key: likedLocation.key, target: likedLocation.target, title: "Liked Music", rows: [Row(title: "Night Drive", subtitle: "YTfast demo", play: songTarget, video: "abcdefghijk")], loading: false, more: false)
+    api.state.pages = [fixture, likedPage]; controller.refresh()
+    panel.sections.selectedSegment = 1; panel.changeSection(panel.sections)
+    let writesBeforeSearch = api.sent.filter { $0["op"] as? String == "add" }.count
+    panel.addSong(nil); verify(panel.location.song != nil && panel.search.isHidden)
+    panel.focusSearch()
+    verify(panel.location.key == likedLocation.key && panel.location.song == nil && !panel.search.isHidden && panel.search.currentEditor() != nil, "Command-F must restore browsing and focus visible search from Add")
+    verify(api.sent.filter { $0["op"] as? String == "add" }.count == writesBeforeSearch, "leaving Add for search must not write account data")
+    panel.view.layoutSubtreeIfNeeded()
+    let availableCell = panel.table.view(atColumn: 0, row: 0, makeIfNecessary: true) as! MusicCell
+    availableCell.showActions(true)
+    let availabilityReloads = panel.reloadCount
+    let hoverEvent = NSEvent.enterExitEvent(with: .mouseEntered, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!
+    availableCell.playActionButton.mouseEntered(with: hoverEvent)
+    verify(availableCell.playActionButton.isHovered, "reused native button must expose its hover state")
+    api.state.pages = nil; api.state.adding = true; controller.refresh()
+    verify(!availableCell.playActionButton.isEnabled && !availableCell.addActionButton.isEnabled && !availableCell.playActionButton.isHovered, "pending Add must disable visible actions and clear hover")
+    api.state.adding = false; controller.refresh()
+    verify(availableCell.playActionButton.isEnabled && availableCell.addActionButton.isEnabled && panel.reloadCount == availabilityReloads, "Add completion must re-enable the same row without a table reload")
+    verify(panel.table.view(atColumn: 0, row: 0, makeIfNecessary: false) === availableCell, "availability changes must retain the existing cell")
+    availableCell.playActionButton.mouseEntered(with: hoverEvent); availableCell.showActions(false)
+    verify(!availableCell.playActionButton.isHovered, "hiding a reused button must clear hover")
+    libraryRoot()
+
     // Artifact screenshots are deliberately synthetic and only written on CI.
     if ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] == "true",
        let directory = ProcessInfo.processInfo.environment["YTFAST_UI_CAPTURE_DIR"] {
@@ -260,9 +357,24 @@ func selfTest() {
             let frame = control.convert(control.bounds, to: panel.view)
             verify(panel.view.bounds.contains(frame) && frame.width >= 28 && frame.height >= 28, "transport hit areas must be visible and usable")
         }
+        let visualSearch = Location.from(encodeTarget("Search", ["query": "Daft Punk", "params": NSNull()]), title: "Search")!
+        api.state.pages = [fixture, searchPage(visualSearch, loading: true)]; controller.refresh()
+        panel.navigate(visualSearch)
+        capture("search-loading-dark.png", appearance: .darkAqua)
+        let visualRows = ["One More Time", "Digital Love", "Something About Us", "Around the World"].enumerated().map { index, title in
+            Row(title: title, subtitle: "Daft Punk", play: songTarget, video: "fixture\(index)")
+        } + [Row(title: "Discovery", subtitle: "Album · Daft Punk · 2001", browse: browseTarget("MPREfixture")), Row(title: "Daft Punk essentials", subtitle: "Playlist · 24 songs", browse: browseTarget("VLPLfixture"))]
+        api.state.pages = [fixture, searchPage(visualSearch, rows: visualRows)]; controller.refresh()
+        capture("search-dark.png", appearance: .darkAqua)
+        panel.table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        let hoveredCell = panel.table.view(atColumn: 0, row: 0, makeIfNecessary: true) as! MusicCell
+        hoveredCell.showActions(true); hoveredCell.playActionButton.mouseEntered(with: hoverEvent)
+        capture("search-actions-dark.png", appearance: .darkAqua)
+        api.state.pages = [fixture, searchPage(visualSearch)]; controller.refresh()
+        capture("search-empty-dark.png", appearance: .darkAqua)
     }
     panel.closed(); window.orderOut(nil)
-    let result: [String: Any] = ["result": "pass", "checks": ["prelaunch_wake", "one_status_item", "native_popover", "shuffle", "seek", "editable_only", "captured_song", "1000_scrollable_rows", "visible_cell_reuse", "refresh_preserves_content", "loading_can_pause", "search_dedup", "stale_result_navigation", "signed_out_gating", "actionable_signin", "reconnect_progress", "connecting_transport_gating", "single_profile_label", "missing_profile_not_substituted", "first_load_exposes_cancel", "warm_open_no_reload", "position_ticks_no_reload", "reopen_preserves_destination", "back_restores_search", "search_section_state", "selection_is_not_playback", "seek_tracking_stability", "seek_accounting_for_track_change", "volume_tracking_stability", "mute_restores_volume", "current_song_uses_transport", "inline_account", "search_focus_from_account", "control_hit_areas", "search_descendant_section_state", "library_section_sizing", "connect_hit_area", "inline_collection_play", "single_collection_navigation_row", "normalization_state_dispatch", "row_add_captures_song", "stale_row_action_account_boundary", "search_tab_navigation"], "warm_open_ms": warmOpenMilliseconds, "warm_open_reloads": warmReloadDelta, "render_1000_rows_ms": renderMilliseconds, "instantiated_rows": liveRows, "player_library_height_pt": playerLibraryHeight, "collection_height_pt": collectionHeight]
+    let result: [String: Any] = ["result": "pass", "checks": ["prelaunch_wake", "one_status_item", "native_popover", "shuffle", "seek", "editable_only", "captured_song", "1000_scrollable_rows", "visible_cell_reuse", "refresh_preserves_content", "loading_can_pause", "search_dedup", "stale_result_navigation", "signed_out_gating", "actionable_signin", "reconnect_progress", "connecting_transport_gating", "single_profile_label", "missing_profile_not_substituted", "first_load_exposes_cancel", "warm_open_no_reload", "position_ticks_no_reload", "reopen_preserves_destination", "back_restores_search", "search_section_state", "selection_is_not_playback", "seek_tracking_stability", "seek_accounting_for_track_change", "volume_tracking_stability", "mute_restores_volume", "current_song_uses_transport", "inline_account", "search_focus_from_account", "control_hit_areas", "search_descendant_section_state", "library_section_sizing", "connect_hit_area", "inline_collection_play", "single_collection_navigation_row", "normalization_state_dispatch", "row_add_captures_song", "stale_row_action_account_boundary", "search_tab_navigation", "search_preserves_typed_spaces", "search_loading_viewport_stable", "search_history_preserves_draft", "marked_text_not_submitted", "marked_text_survives_snapshot", "search_back_resumes_debounce", "search_focus_resumes_debounce", "search_exits_add_without_write", "row_availability_without_reload", "reused_button_hover_reset"], "warm_open_ms": warmOpenMilliseconds, "warm_open_reloads": warmReloadDelta, "render_1000_rows_ms": renderMilliseconds, "instantiated_rows": liveRows, "player_library_height_pt": playerLibraryHeight, "collection_height_pt": collectionHeight]
     print(String(decoding: try! JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]), as: UTF8.self))
     NSStatusBar.system.removeStatusItem(controller.status)
 }

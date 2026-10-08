@@ -87,6 +87,47 @@ struct MenuPage {
     message: Option<String>,
 }
 
+#[derive(Serialize)]
+struct MenuTrack<'a> {
+    id: &'a str,
+    title: &'a str,
+    artist: String,
+}
+
+#[derive(Serialize)]
+struct MenuProfile<'a> {
+    id: &'a str,
+    label: &'a str,
+}
+
+/// Borrow the catalogue until its single serialization into the FFI buffer.
+/// Building an owned JSON tree here would duplicate every loaded row before
+/// Swift decodes the same catalogue on the other side of this boundary.
+#[derive(Serialize)]
+struct MenuSnapshot<'a> {
+    track: Option<MenuTrack<'a>>,
+    playing: bool,
+    loading: bool,
+    position: f64,
+    duration: f64,
+    volume: f64,
+    shuffle: bool,
+    format: Option<&'a str>,
+    normalize: bool,
+    signed_in: bool,
+    account_checking: bool,
+    account_unverified: bool,
+    account: String,
+    profile: Option<&'a str>,
+    profiles: Vec<MenuProfile<'a>>,
+    pages: Option<Vec<&'a MenuPage>>,
+    notice: Option<&'a str>,
+    error: Option<&'a str>,
+    adding: bool,
+    show: bool,
+    quit: bool,
+}
+
 struct Continuation {
     token: String,
     shelf: Option<usize>,
@@ -603,13 +644,15 @@ impl Core {
         }
     }
 
-    fn snapshot(&mut self) -> Value {
+    fn snapshot(&mut self) -> Result<String> {
         self.poll();
         let now = self.backend.now.borrow();
         let pb = &now.playback;
-        let track = now
-            .track()
-            .map(|t| json!({"id":t.video_id,"title":t.title,"artist":t.artist_line()}));
+        let track = now.track().map(|t| MenuTrack {
+            id: &t.video_id,
+            title: &t.title,
+            artist: t.artist_line(),
+        });
         let (signed_in, status) = match &self.account {
             Account::Checking => (false, "Connecting…".to_owned()),
             Account::SignedIn { name, source, .. } => (true, format!("{name} · {source}")),
@@ -617,21 +660,38 @@ impl Core {
                 (false, reason.clone())
             }
         };
-        let pages = std::mem::take(&mut self.catalog_dirty).then(|| {
-            self.pages
-                .values()
-                .map(|e| e.page.clone())
-                .collect::<Vec<_>>()
-        });
-        json!({"track":track,"playing":pb.playing,"loading":pb.loading,"position":pb.position,
-            "duration":pb.duration,"volume":pb.volume,"shuffle":pb.shuffle,"format":pb.format,
-            "normalize":pb.normalize,
-            "signed_in":signed_in,"account_checking":matches!(self.account, Account::Checking),
-            "account_unverified":matches!(self.account, Account::Unverified { .. }),
-            "account":status,"profile":self.profile,
-            "profiles":self.profiles.iter().map(|p|json!({"id":p.id,"label":p.label})).collect::<Vec<_>>(),
-            "pages":pages,"notice":self.notice,"error":self.error,"adding":self.pending_add.is_some(),
-            "show":std::mem::take(&mut self.show),"quit":self.quit})
+        let pages = std::mem::take(&mut self.catalog_dirty)
+            .then(|| self.pages.values().map(|e| &e.page).collect());
+        Ok(serde_json::to_string(&MenuSnapshot {
+            track,
+            playing: pb.playing,
+            loading: pb.loading,
+            position: pb.position,
+            duration: pb.duration,
+            volume: pb.volume,
+            shuffle: pb.shuffle,
+            format: pb.format.as_deref(),
+            normalize: pb.normalize,
+            signed_in,
+            account_checking: matches!(self.account, Account::Checking),
+            account_unverified: matches!(self.account, Account::Unverified { .. }),
+            account: status,
+            profile: self.profile.as_deref(),
+            profiles: self
+                .profiles
+                .iter()
+                .map(|p| MenuProfile {
+                    id: &p.id,
+                    label: &p.label,
+                })
+                .collect(),
+            pages,
+            notice: self.notice.as_deref(),
+            error: self.error.as_deref(),
+            adding: self.pending_add.is_some(),
+            show: std::mem::take(&mut self.show),
+            quit: self.quit,
+        })?)
     }
 }
 
@@ -643,12 +703,18 @@ fn valid_video(id: &str) -> bool {
 }
 
 fn ffi_result(f: impl FnOnce() -> Result<Value>) -> *mut c_char {
-    let value = match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(Ok(value)) => value,
-        Ok(Err(error)) => json!({"fatal":format!("{error:#}")}),
-        Err(_) => json!({"fatal":"YTfast encountered an internal error. Quit and reopen it."}),
+    ffi_encoded_result(|| Ok(f()?.to_string()))
+}
+
+fn ffi_encoded_result(f: impl FnOnce() -> Result<String>) -> *mut c_char {
+    let text = match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(Ok(text)) => text,
+        Ok(Err(error)) => json!({"fatal":format!("{error:#}")}).to_string(),
+        Err(_) => {
+            json!({"fatal":"YTfast encountered an internal error. Quit and reopen it."}).to_string()
+        }
     };
-    CString::new(value.to_string())
+    CString::new(text)
         .expect("JSON has no literal NUL")
         .into_raw()
 }
@@ -734,7 +800,7 @@ pub extern "C" fn ytfast_start(wake: extern "C" fn()) -> *mut c_char {
 /// `text` must point to a valid NUL-terminated UTF-8 string, at most 64 KiB.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ytfast_call(text: *const c_char) -> *mut c_char {
-    ffi_result(|| {
+    ffi_encoded_result(|| {
         if text.is_null() {
             bail!("Missing command");
         }
@@ -751,7 +817,7 @@ pub unsafe extern "C" fn ytfast_call(text: *const c_char) -> *mut c_char {
             if let Err(error) = core.request(request) {
                 core.error = Some(format!("{error:#}"));
             }
-            Ok(core.snapshot())
+            core.snapshot()
         })
     })
 }

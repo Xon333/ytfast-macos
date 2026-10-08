@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 
 struct Song: Codable, Equatable { var id: String; var title: String; var artist: String }
 struct Profile: Codable, Equatable { var id: String; var label: String }
@@ -25,7 +26,7 @@ protocol PlayerAPI { func send(_ action: [String: Any]) -> State? }
 func consume(_ pointer: UnsafeMutablePointer<CChar>?) -> Data {
     guard let pointer else { return Data() }
     defer { ytfast_free(pointer) }
-    return Data(String(cString: pointer).utf8)
+    return Data(bytes: pointer, count: strlen(pointer))
 }
 
 final class CoreAPI: PlayerAPI {
@@ -53,13 +54,12 @@ let playlistKey = "browse:\(playlistID):"
 struct Location {
     var target: String; var key: String; var title: String
     var song: Song?; var scroll = NSPoint.zero
+    // The request uses a normalized query; the editor/history keep exactly what
+    // was typed. Neither transport updates nor debounce may rewrite that draft.
+    var query = ""
+    var searchText = ""
     var libraryIndex: Int? {
         (0..<3).first { Location.library($0).key == key }
-    }
-    var query: String {
-        guard let object = try? JSONSerialization.jsonObject(with: Data(target.utf8)) as? [String: Any],
-              let search = object["Search"] as? [String: Any] else { return "" }
-        return search["query"] as? String ?? ""
     }
     var identity: String { key + (song.map { ":add:\($0.id)" } ?? "") }
     static func library(_ index: Int) -> Location {
@@ -73,7 +73,7 @@ struct Location {
             return Location(target: target, key: "browse:\(id):\(body["params"] as? String ?? "")", title: title)
         }
         if let body = object["Search"] as? [String: Any], let query = body["query"] as? String {
-            return Location(target: target, key: "search:\(query):\(body["params"] as? String ?? "")", title: title)
+            return Location(target: target, key: "search:\(query):\(body["params"] as? String ?? "")", title: title, query: query, searchText: query)
         }
         return nil
     }

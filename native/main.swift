@@ -35,6 +35,7 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private(set) var state = State()
     private(set) var status: NSStatusItem!
     private(set) var panel: PlayerPanel!
+    private(set) var dismissal: PopoverDismissal!
     let popover = NSPopover()
     private var signals: [DispatchSourceSignal] = []
     private var mediaStamp: MediaStamp?
@@ -55,8 +56,11 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         panel = PlayerPanel { [weak self] action in self?.send(action) }
         panel.sizeChanged = { [weak self] size in self?.popover.contentSize = size }
         panel.closeRequested = { [weak self] in self?.popover.performClose(nil) }
+        NativeTheme.install(on: panel)
         popover.contentViewController = panel; popover.contentSize = panel.preferredContentSize
-        popover.behavior = .transient; popover.animates = false; popover.delegate = self
+        popover.appearance = NSAppearance(named: .darkAqua)
+        popover.behavior = .applicationDefined; popover.animates = false; popover.delegate = self
+        dismissal = PopoverDismissal(popover: popover, button: status.button!)
         if !testing { installApplicationMenu() }
     }
     func send(_ action: [String: Any]) { if let next = api.send(action) { apply(next) } }
@@ -81,8 +85,12 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
     }
-    func popoverWillShow(_ notification: Notification) { status.button?.highlight(true); panel.opened() }
-    func popoverDidClose(_ notification: Notification) { status.button?.highlight(false); panel.closed() }
+    func popoverWillShow(_ notification: Notification) {
+        status.button?.highlight(true); panel.opened(); dismissal.start()
+    }
+    func popoverDidClose(_ notification: Notification) {
+        dismissal.stop(); status.button?.highlight(false); panel.closed()
+    }
     @objc private func focusSearch(_ sender: Any?) { showPopover(); panel.focusSearch() }
     @objc private func refreshLibrary(_ sender: Any?) { panel.refreshPage(sender) }
     @objc private func quit(_ sender: Any?) { send(["op": "quit"]) }
@@ -163,7 +171,7 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
     func applicationWillTerminate(_ notification: Notification) {
-        shuttingDown = true; panel?.closed()
+        shuttingDown = true; dismissal?.stop(); panel?.closed()
         if !testing {
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
             MPNowPlayingInfoCenter.default().playbackState = .stopped
@@ -194,6 +202,7 @@ func memorySample() -> [String: Any] {
 }
 
 if CommandLine.arguments.contains("--self-test") {
+    finishSelfTest()
     selfTest()
 } else {
     let data = consume(ytfast_start(nativeWake))

@@ -2,14 +2,14 @@
 
 **YouTube Music in your menu bar. Native, fast and lightweight.** Browse your library and control playback without a WebView, browser player or Dock window.
 
-[**Download v0.4.0 · Apple Silicon**](https://github.com/Xon333/ytfast-macos/actions/runs/37744004866/artifacts/11534358550) · [Newer CI builds](https://github.com/Xon333/ytfast-macos/actions/workflows/ci.yml) · [Verified changes](docs/CURRENT.md)
+[**Download current dark build · Apple Silicon**](https://github.com/Xon333/ytfast-macos/actions/runs/37795329364/artifacts/11558552619) · [CI builds](https://github.com/Xon333/ytfast-macos/actions/workflows/ci.yml) · [Verified changes](docs/CURRENT.md)
 
 <p align="center">
-  <img src="docs/screenshots/menu-bar-current.png" width="245" alt="Native player and playlist browser">
-  <img src="docs/screenshots/menu-bar-playlist.png" width="245" alt="Open playlist with inline playback">
-  <img src="docs/screenshots/menu-bar-account.png" width="245" alt="Connected browser account and profile picker">
+  <img src="docs/screenshots/menu-bar-current.png" width="245" alt="Earlier native player and playlist layout">
+  <img src="docs/screenshots/menu-bar-playlist.png" width="245" alt="Earlier open-playlist layout">
+  <img src="docs/screenshots/menu-bar-account.png" width="245" alt="Earlier connected-account layout">
 </p>
-<p align="center"><sub>Native AppKit captures from the v0.4.0 CI artifact · example music data</sub></p>
+<p align="center"><sub>Earlier native layout with example data. Fresh dark-theme captures are included in the current download.</sub></p>
 
 ## Install
 
@@ -22,7 +22,7 @@
    ```
 
 2. Download the build above. **Unzip twice:** first the GitHub Actions download, then `dist/ytfast-macos-arm64.zip` inside it.
-3. Move `YTfast.app` to **Applications**, replacing the old version. Open it and click the music-note item in the menu bar.
+3. Quit any running YTfast, then move `YTfast.app` to **Applications**, replacing the old version. Open it and click the music-note item in the menu bar.
 
 The app is ad-hoc signed, not notarized. If macOS blocks it, use **System Settings → Privacy & Security → Open Anyway**.
 
@@ -38,6 +38,7 @@ Safari and Firefox sessions are not supported. Credentials are handled locally; 
 
 - **Player:** play/pause, next/previous, seek, volume, mute, shuffle, macOS media keys and Now Playing.
 - **Library:** Search, Playlists, Liked and Albums; inline navigation, keyboard control and Add to playlist.
+- **Dark native controls:** Catppuccin Mocha colours, lavender accents and compact reusable AppKit components; dark even under a light system appearance.
 - **Source-quality audio:** direct mpv playback, with Premium Opus/AAC selected by yt-dlp when available. No transcoding or artificial enhancement.
 - **Quick starts:** stream lookup and player startup overlap queue loading; valid streams can be reused across launches.
 - **Small footprint:** AppKit + Rust, reusable rows, no WebView and no idle audio helpers.
@@ -60,6 +61,6 @@ The build also produces `dist/ytfast-macos-<arch>.zip`. See [architecture](docs/
 
 ---
 
-Based on [MayberryDT/ytfast](https://github.com/MayberryDT/ytfast) (MIT). Native UI patterns informed by [Radio](https://github.com/pom11/Radio), [MacControlCenterUI](https://github.com/orchetect/MacControlCenterUI) and [Mino](https://github.com/nad-bit/Mino); playback reference: [Sonora](https://github.com/sonorahq/sonora). [License](LICENSE).
+Based on [MayberryDT/ytfast](https://github.com/MayberryDT/ytfast) (MIT). Native controls adapt source from [Mino](https://github.com/nad-bit/Mino) and [MacControlCenterUI](https://github.com/orchetect/MacControlCenterUI); colours reuse [Catppuccin Mocha](https://github.com/catppuccin/palette). Their MIT notices are bundled. Design reference: [Radio](https://github.com/pom11/Radio); playback reference: [Sonora](https://github.com/sonorahq/sonora). [License](LICENSE).
 
 *Unofficial. Not affiliated with YouTube or Google.*

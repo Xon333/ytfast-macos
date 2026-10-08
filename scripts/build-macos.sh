@@ -31,6 +31,9 @@ swiftc -swift-version 5 -O -whole-module-optimization \
 chmod 755 "$app/Contents/MacOS/ytfast"
 install -m 644 LICENSE "$app/Contents/Resources/LICENSE"
 install -m 644 assets/icons/LICENSE.txt "$app/Contents/Resources/Lucide-LICENSE.txt"
+for license in native/ThirdParty/*-LICENSE.txt; do
+  install -m 644 "$license" "$app/Contents/Resources/"
+done
 version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -1)"
 revision="$(git rev-parse HEAD)"
 if ! git diff --quiet HEAD --; then revision="$revision-dirty"; fi
