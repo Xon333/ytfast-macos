@@ -2,7 +2,7 @@
 
 **A small YouTube Music player in your menu bar.** Native AppKit + Rust, without a WebView, browser player or Dock window.
 
-[**Mac builds**](https://github.com/Xon333/ytfast-macos/actions/workflows/ci.yml) · [Verified state](docs/CURRENT.md)
+[**Download 0.5.0 · Apple Silicon**](https://github.com/Xon333/ytfast-macos/actions/runs/37814352878/artifacts/11568240145) · [Verified state](docs/CURRENT.md) · [CI builds](https://github.com/Xon333/ytfast-macos/actions/workflows/ci.yml)
 
 ## Use
 
@@ -10,7 +10,7 @@ The player opens compact: your song, the playing collection, transport and four 
 
 **Shuffle On / Off** controls the current queue and future collections. It preserves the current song; a collection's Play action becomes Shuffle when enabled and starts at a random loaded song. Explicitly selecting a song still starts that song. Turn shuffle off to restore the collection's order. The mode is available before choosing music.
 
-OLED-black surfaces use [Oxocarbon](https://github.com/nyoom-engineering/oxocarbon.nvim)'s neutral, pink and green tokens, with no blue accents. Play/Pause stays circular. Codec, bitrate and available Premium metadata are in **More (⋯)**, not the player card.
+OLED-black surfaces use [Oxocarbon](https://github.com/nyoom-engineering/oxocarbon.nvim)'s neutral, pink and green tokens, with no blue accents. Play/Pause stays circular. Codec, bitrate and available Premium metadata are in **More (⋯)**, not the player card. The download includes native screenshots with synthetic music data.
 
 **Shortcuts:** `⌘F` search · `⌘R` refresh the expanded view · `Space` play/pause · `Return` activate a selected row · `Esc` back/collapse/close · `⌘Q` quit.
 
@@ -24,7 +24,7 @@ OLED-black surfaces use [Oxocarbon](https://github.com/nyoom-engineering/oxocarb
    brew install mpv yt-dlp deno
    ```
 
-2. Download the verified build linked in [Current state](docs/CURRENT.md). GitHub Actions wraps it in an outer ZIP: extract that, then `dist/ytfast-macos-arm64.zip` inside it.
+2. Download the build above. GitHub Actions wraps it in an outer ZIP: extract that, then `dist/ytfast-macos-arm64.zip` inside it.
 3. Quit YTfast, move the new `YTfast.app` to **Applications**, replacing the old app, and open it.
 
 The app is ad-hoc signed, not notarized. If macOS blocks it, use **System Settings → Privacy & Security → Open Anyway**.

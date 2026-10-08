@@ -1,24 +1,47 @@
 # Current state
 
-**Updated:** 8 October 2026 · **Candidate:** 0.5.0, compact OLED player
+**Updated:** 8 October 2026 · **Verified build:** 0.5.0, compact OLED player
 
-[Current pass](https://github.com/Xon333/ytfast-macos/pull/7) · [Architecture](MACOS.md) · [Measured audio correction](https://github.com/Xon333/ytfast-macos/pull/6)
+[Implementation and merge record](https://github.com/Xon333/ytfast-macos/pull/7) · [Architecture](MACOS.md) · [Measured audio correction](https://github.com/Xon333/ytfast-macos/pull/6)
 
-## Candidate — verification pending
+## Applied result
 
-Branch `feat/compact-oled-20261008` includes the measured audio implementation from `71c982f` and reconciles the subsequent main documentation. The memory branch is preserved.
+The 360-point player opens at **196 points high** in the connected fixture. Search, Playlists, Liked and Albums expand on demand and collapse on dismissal. The current song/collection remains in the player; codec/bitrate metadata is in More. The Play/Pause fill is a true circle. Visible Shuffle On/Off governs current and future queues, preserves the current song, and changes collection Play into Shuffle. Explicit song selections stay exact; existing queue shuffle/unshuffle is reused.
 
-The player opens compact, with current song/collection and Search, Playlists, Liked and Albums launchers. Only the selected destination expands; closing resets expansion. Play/Pause paints a true circle. Shuffle On/Off is global, preserves the current song, and changes collection Play into Shuffle; explicit song selections remain exact. Audio-format metadata moves to More.
+The root is opaque black. Exact non-blue Oxocarbon tokens supply neutral surfaces, pink accents and green active shuffle; Mino-derived controls and MacControlCenterUI volume symbols remain. The bundled notices were checked. No runtime framework or package was added. Exact reuse → adaptation → rebuild last remains repository-wide guidance in AGENTS.md.
 
-The OLED root is black. Exact non-blue Oxocarbon literals supply neutral surfaces, pink accents and green active shuffle; existing Mino controls and native navigation/queue code are reused. Licenses are bundled; no runtime framework or package is added. The repo-wide reuse-first rule remains in AGENTS.
+Only the expanded page crosses the Rust/Swift bridge. Closing releases its native page/row copies; the bounded Rust cache remains. There is no eager hidden-library request or hidden visual-effect material. App-local text assistance is disabled where supported, without changing host settings. Queue fetching begins before old-player cleanup, redundant Stop is avoided, and cold successor resolution waits for current load acceptance. Source-quality selection, account isolation and audio-buffer bounds are retained.
 
-Only the expanded page crosses the Rust/Swift bridge; closing releases native page/row copies while the bounded Rust cache remains. Queue fetching starts before old-player cleanup, redundant Stop is avoided, and a cold successor resolver waits for current load acceptance. Audio quality, account isolation and buffers remain unchanged. The non-improving callback autorelease experiment from PR #6 is not reintroduced. The app-shell catalogue copy is released here specifically so the new collapsed-state contract actually drops the last native page owner.
+## Exact package and verification
 
-Native compilation, revised interaction fixtures and captures for this candidate are pending. The package below is the accepted predecessor, not this candidate.
+[CI run 37814352878](https://github.com/Xon333/ytfast-macos/actions/runs/37814352878) passed on macOS 15 Apple Silicon and Ubuntu for source **`0ec7844adc7cc8a5b610804f6912c410d4b152ea`**. The Mac job was retried after a runner-less cancellation. The final README/CURRENT update changes no production code or tests; this valid build evidence is reused.
+
+[Download app and native captures](https://github.com/Xon333/ytfast-macos/actions/runs/37814352878/artifacts/11568240145). The installable inner file is `dist/ytfast-macos-arm64.zip`. Version **0.5.0**, packaged revision **`d64a6093d0646fc043dc3738238fd1916486f4c5`**: its tree equals the tested source tree. This PR build revision differs from the later documentation/merge commit.
+
+| Identity | SHA-256 |
+| --- | --- |
+| Actions archive | `8b196360333270d645aed8cfb0da428fe6faa252f5696a395e51f5a25671d1fd` |
+| Installable ZIP | `3272ec5eff62a1104d81391216857ab43352f12e75e7e6386c3c830eead3d899` |
+| Executable | `7145db634f81f55de320fd7d0f7c2d147307fb92432d244ad1783b2060a8b7bb` |
+
+Downloaded archive integrity, hashes, executable permission, version, both revision fields and licenses were checked. AppKit typecheck, formatting/Clippy, core and retained-desktop tests, production mpv transport, offline format selection, renderer-free dependency checks, packaging/signature and isolated launch/Show/Quit/no idle audio children passed. The native result contains **53 regression checks plus 10 compact-flow checks**. All **15 actual AppKit fixture captures** were inspected, including dark appearance under a light host. No clipping or control overlap was observed in those captures.
+
+## Current synthetic measurements
+
+| Native fixture | Result |
+| --- | --- |
+| Collapsed / four-row expanded height | 196 / 418 pt |
+| Warm-open handler, 30 cycles | 0.259 ms mean; zero table reloads |
+| 1,000-row apply/layout | 25.787 ms; five instantiated rows |
+| Signed-out idle process | 12.74 MiB physical footprint / 58.09 MiB RSS |
+| Expanded test-process snapshot | 71.66 MiB footprint / 116.64 MiB RSS |
+| Collapsed test-process snapshot | 72.03 MiB footprint / 117.02 MiB RSS |
+
+These are account-free CI observations, not live click-to-audio or a matched previous-build memory comparison. The expanded/collapsed snapshots are from the UI test process, not the separate idle app. **Native reference release passed, but an immediate process-memory decrease on collapse was not observed.** No sustained sub-100 MB or 50 MB listening-session claim is established.
 
 ## Reused measured audio result
 
-[Probe 37806011920](https://github.com/Xon333/ytfast-macos/actions/runs/37806011920): same macOS 15 runner, generated 48 kHz stereo 256 kbps Opus, unchanged cache bounds and queued successor, null audio output. Nine short trials and two three-minute trials passed. The exact built-in `libmpv` profile was tried before adapting through existing script-disable options; that implementation is retained unchanged here.
+[Probe 37806011920](https://github.com/Xon333/ytfast-macos/actions/runs/37806011920) used the same macOS 15 runner, generated 48 kHz stereo 256 kbps Opus, unchanged cache bounds and a queued successor, with null audio output. Nine short and two three-minute trials passed. The exact built-in mpv `libmpv` profile was tried before adapting through existing script-disable options; this implementation remains unchanged.
 
 | Helper-only fixture | Baseline | Applied policy |
 | --- | ---: | ---: |
@@ -27,18 +50,12 @@ Native compilation, revised interaction fixtures and captures for this candidate
 | Three-minute RSS | 135.09 MiB | 142.23 MiB |
 | Short load to playback-restart, median of 3 | 22.00 ms | 3.99 ms |
 
-`M` preserves vmmap output. RSS did not consistently improve. These are not acoustic onset, real YouTube latency, total application memory or a guarantee of 50–100 MB on the user's Mac. [Raw probe data](https://github.com/Xon333/ytfast-macos/actions/runs/37806011920/artifacts/11562374079).
+`M` preserves vmmap output. RSS did not consistently improve. These are not acoustic onset, real YouTube latency or total application memory. [Raw probe data](https://github.com/Xon333/ytfast-macos/actions/runs/37806011920/artifacts/11562374079). The preceding callback-pool/metadata experiment did not improve memory and remains discarded; the new shell page release exists specifically to satisfy collapsed-state ownership, not to resurrect that experiment.
 
-The preceding [Swift experiment](https://github.com/Xon333/ytfast-macos/actions/runs/37806897479) measured final median footprint 42.86 → 44.35 MiB, not a gain; its callback-pool/metadata experiment and extra harness were discarded. New compact-view measurements must be identified separately.
+## Real-Mac limits and predecessor
 
-## Accepted predecessor
+The earlier native report measured app footprint 34.0M idle / 43.0M during playback-state observation, plus 116.7M for its mpv child. These are previous-build, separate-process readings. The later screenshots show 107.5–133 MB without memory-column headings; their metric is not inferred.
 
-[CI 37808615571](https://github.com/Xon333/ytfast-macos/actions/runs/37808615571) passed for source `71c982fa134949fbf687e1f819b080818856d616`. [Preceding 0.4.0 package](https://github.com/Xon333/ytfast-macos/actions/runs/37808615571/artifacts/11564426394), embedded revision `0a56c40c9649388b7efa9dc49ece8235bb64097a`, contains the same tested tree. Its installable ZIP SHA-256 is `29cc0cdc07ea52e5b66de573e42cf4b49c3bc172bbba73eb80ecf2081219dac8`.
+No current same-Mac memory comparison, acoustic onset/dropout measurement, real IME-composition acceptance or long-term guarantee is established. Removal of the OS AutoFill helper is not established. No real account was accessed or modified for CI. Raw account reports/captures stay outside Git/CI. Distribution remains ad-hoc signed and not notarized.
 
-It passed 44 core tests per platform, 31 retained desktop tests, 53 native fixtures, focused dismissal tests, mpv IPC/options/queue progression, offline format contract, renderer-free graph, packaging/signature and isolated smoke. [PR #5](https://github.com/Xon333/ytfast-macos/pull/5) preserves earlier native validation and dismissal evidence.
-
-## Real-Mac limits
-
-Earlier validation measured app footprint 34.0M idle / 43.0M during playback-state observation, plus 116.7M for its mpv child. These are previous-build, separate-process readings. The current screenshots show 107.5–133 MB without memory-column headings; that metric is not inferred.
-
-No current same-Mac memory comparison, acoustic click-to-audio measurement or long-term target guarantee is established. Search assistance is scoped to the app's text controls; removal of the OS AutoFill helper is not established. Account data, permissions and saved preferences are not modified by setup. Raw account reports/captures stay outside Git/CI. Distribution remains ad-hoc signed and not notarized.
+[PR #5](https://github.com/Xon333/ytfast-macos/pull/5) retains the earlier native report and dismissal evidence. [Predecessor CI](https://github.com/Xon333/ytfast-macos/actions/runs/37808615571) and [0.4.0 package](https://github.com/Xon333/ytfast-macos/actions/runs/37808615571/artifacts/11564426394) preserve source `71c982f`, package revision `0a56c40`, and its measured mpv correction.
