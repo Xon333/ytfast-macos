@@ -132,8 +132,10 @@ final class ConnectButton: NSButton {
     }
     override func draw(_ dirtyRect: NSRect) {
         let pressed = cell?.isHighlighted == true
-        let fill = isEnabled ? NativeTheme.accent : NativeTheme.border
-        fill.withAlphaComponent(pressed ? 0.75 : 1).setFill()
+        // Preserve the disabled surface alpha; replacing it with 1 makes
+        // white-on-white text on the OLED palette's neutral border colour.
+        let fill = isEnabled ? NativeTheme.accent.withAlphaComponent(pressed ? 0.75 : 1) : NativeTheme.border
+        fill.setFill()
         NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6).fill()
         let text = NSAttributedString(string: title, attributes: [
             .font: font ?? NSFont.systemFont(ofSize: 12, weight: .semibold),
