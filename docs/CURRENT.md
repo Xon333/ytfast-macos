@@ -16,7 +16,7 @@ Only the expanded page crosses the Rust/Swift bridge. Closing releases its nativ
 
 [CI run 37814352878](https://github.com/Xon333/ytfast-macos/actions/runs/37814352878) passed on macOS 15 Apple Silicon and Ubuntu for source **`0ec7844adc7cc8a5b610804f6912c410d4b152ea`**. The Mac job was retried after a runner-less cancellation. The final README/CURRENT update changes no production code or tests; this valid build evidence is reused.
 
-[Download app and native captures](https://github.com/Xon333/ytfast-macos/actions/runs/37814352878/artifacts/11568240145). The installable inner file is `dist/ytfast-macos-arm64.zip`. Version **0.5.0**, packaged revision **`d64a6093d0646fc043dc3738238fd1916486f4c5`**: its tree equals the tested source tree. This PR build revision differs from the later documentation/merge commit.
+[Historical CI package and native captures](https://github.com/Xon333/ytfast-macos/actions/runs/37814352878/artifacts/11568240145) document the generated `dist/ytfast-macos-arm64.zip` artifact; current installation uses the [source build instructions](../README.md#build-from-source). Version **0.5.0**, packaged revision **`d64a6093d0646fc043dc3738238fd1916486f4c5`**: its tree equals the tested source tree. This PR build revision differs from the later documentation/merge commit.
 
 | Identity | SHA-256 |
 | --- | --- |
