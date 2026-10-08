@@ -89,20 +89,25 @@ pub fn check_dependencies() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Remove leftover session exports on startup and normal exit, while holding
-/// the instance lock. Persistent library/settings data are never removed.
-#[cfg(target_os = "macos")]
+/// Remove leftover cookie exports on startup and normal exit, while holding
+/// the instance lock. The resolver owns its bounded, expiring, account-scoped
+/// URL cache; deleting it here would force every relaunch to resolve again.
+#[cfg(any(target_os = "macos", test))]
 pub struct SessionFiles(pub std::path::PathBuf);
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 impl SessionFiles {
     pub fn clear(&self) {
         if let Ok(entries) = std::fs::read_dir(&self.0) {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
+                let session_export = name
+                    .strip_prefix("cookies-")
+                    .and_then(|name| name.strip_suffix(".txt"))
+                    .is_some_and(|id| id.len() == 32 && id.bytes().all(|c| c.is_ascii_hexdigit()));
                 if name == "cookies.txt"
-                    || name == "streams.json"
+                    || session_export
                     || (name.starts_with("ytdlp-") && name.ends_with(".txt"))
                 {
                     let _ = std::fs::remove_file(entry.path());
@@ -112,7 +117,7 @@ impl SessionFiles {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 impl Drop for SessionFiles {
     fn drop(&mut self) {
         self.clear();
@@ -149,4 +154,50 @@ pub fn tool_path() -> std::ffi::OsString {
         }
     }
     std::env::join_paths(paths).unwrap_or_else(|_| "/usr/bin:/bin".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_cleanup_keeps_reusable_urls_but_removes_cookie_exports() {
+        let directory = std::env::temp_dir().join(format!(
+            "ytfast-session-cleanup-{:032x}",
+            fastrand::u128(..)
+        ));
+        crate::paths::private_dir(&directory).unwrap();
+        for name in [
+            "cookies.txt",
+            "cookies-00000000000000000000000000000001.txt",
+            "cookies-notes.txt",
+            "ytdlp-fixture-1.txt",
+            "streams.json",
+            "unrelated.txt",
+        ] {
+            std::fs::write(directory.join(name), b"fixture").unwrap();
+        }
+        let exports = SessionFiles(directory.clone());
+        exports.clear();
+        assert!(!directory.join("cookies.txt").exists());
+        assert!(
+            !directory
+                .join("cookies-00000000000000000000000000000001.txt")
+                .exists()
+        );
+        assert!(directory.join("cookies-notes.txt").exists());
+        assert!(!directory.join("ytdlp-fixture-1.txt").exists());
+        assert_eq!(
+            std::fs::read(directory.join("streams.json")).unwrap(),
+            b"fixture"
+        );
+        assert!(directory.join("unrelated.txt").exists());
+
+        std::fs::write(directory.join("ytdlp-fixture-2.txt"), b"fixture").unwrap();
+        drop(exports);
+        assert!(!directory.join("ytdlp-fixture-2.txt").exists());
+        assert!(directory.join("streams.json").exists());
+        assert!(directory.join("unrelated.txt").exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }

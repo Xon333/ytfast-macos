@@ -196,10 +196,15 @@ impl Mpv {
             pending,
             _child: child,
         });
-        for (i, name) in OBSERVED.iter().enumerate() {
-            mpv.command(json!(["observe_property", i + 1, name]))
-                .await?;
-        }
+        // Observation registration has no reply dependencies. Submit it in
+        // one ordered write instead of paying eight serial IPC round trips
+        // before the first load can begin. Every reply is still checked.
+        let observations: Vec<_> = OBSERVED
+            .iter()
+            .enumerate()
+            .map(|(i, name)| json!(["observe_property", i + 1, name]))
+            .collect();
+        mpv.commands(&observations).await?;
         Ok(mpv)
     }
 
@@ -254,34 +259,53 @@ impl Mpv {
 
     /// Runs a command and returns its `data`.
     pub async fn command(&self, args: Value) -> Result<Value> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (sender, receiver) = oneshot::channel();
-        self.pending
-            .lock()
-            .expect("pending lock")
-            .insert(id, sender);
-        let _pending = PendingCommand {
-            id,
-            pending: self.pending.clone(),
-        };
-        let mut line = serde_json::to_vec(&json!({ "command": args, "request_id": id }))?;
-        line.push(b'\n');
-        let reply = tokio::time::timeout(Duration::from_secs(2), async {
+        Ok(self.commands(&[args]).await?.remove(0))
+    }
+
+    /// Submit independent commands in order without waiting between writes.
+    /// Request ids preserve reply identity even if mpv answers out of order;
+    /// one timeout and the guards cover the entire batch, including cancel.
+    async fn commands(&self, args: &[Value]) -> Result<Vec<Value>> {
+        let mut waiting = Vec::with_capacity(args.len());
+        let mut guards = Vec::with_capacity(args.len());
+        let mut lines = Vec::new();
+        for args in args {
+            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            let (sender, receiver) = oneshot::channel();
+            self.pending
+                .lock()
+                .expect("pending lock")
+                .insert(id, sender);
+            guards.push(PendingCommand {
+                id,
+                pending: self.pending.clone(),
+            });
+            waiting.push(receiver);
+            serde_json::to_writer(&mut lines, &json!({ "command": args, "request_id": id }))?;
+            lines.push(b'\n');
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
             self.writer
                 .lock()
                 .await
-                .write_all(&line)
+                .write_all(&lines)
                 .await
                 .context("writing to mpv")?;
-            receiver.await.map_err(|_| anyhow!("mpv closed"))
+            let mut results = Vec::with_capacity(waiting.len());
+            for receiver in waiting {
+                let reply = receiver.await.map_err(|_| anyhow!("mpv closed"))?;
+                match reply.get("error").and_then(Value::as_str) {
+                    Some("success") => {
+                        results.push(reply.get("data").cloned().unwrap_or(Value::Null));
+                    }
+                    Some(error) => bail!("mpv: {error}"),
+                    None => bail!("mpv: malformed reply"),
+                }
+            }
+            Ok(results)
         })
         .await
-        .map_err(|_| anyhow!("mpv did not answer"))??;
-        match reply.get("error").and_then(Value::as_str) {
-            Some("success") => Ok(reply.get("data").cloned().unwrap_or(Value::Null)),
-            Some(error) => bail!("mpv: {error}"),
-            None => bail!("mpv: malformed reply"),
-        }
+        .map_err(|_| anyhow!("mpv did not answer"))?
     }
 
     pub async fn set(&self, property: &str, value: Value) -> Result<()> {

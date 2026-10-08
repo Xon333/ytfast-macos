@@ -320,6 +320,7 @@ enum Internal {
     Queue {
         epoch: u64,
         result: Result<WatchNext, String>,
+        preparation: playback::Preparation,
     },
     /// More queue: a long playlist's next page, or the autoplay radio.
     Extended {
@@ -362,7 +363,7 @@ enum Internal {
 struct Appended {
     /// Its queue entry.
     id: u64,
-    itag: u32,
+    format: String,
     /// mpv's playlist entry id.
     entry: i64,
     /// The loudness gain it was queued with.

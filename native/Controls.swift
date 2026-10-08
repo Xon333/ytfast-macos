@@ -51,6 +51,10 @@ final class SymbolButton: NSButton {
         let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
         addTrackingArea(area); tracking = area
         super.updateTrackingAreas()
+        // Reused rows can move underneath a stationary pointer. Recompute the
+        // hover state instead of waiting for a mouse-exit event that never comes.
+        hovered = window.map { $0.isKeyWindow && visibleRect.contains(convert($0.mouseLocationOutsideOfEventStream, from: nil)) } ?? false
+        needsDisplay = true
     }
     override func mouseEntered(with event: NSEvent) { hovered = true; needsDisplay = true }
     override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
@@ -62,6 +66,22 @@ final class SymbolButton: NSButton {
             let radius: CGFloat = primary ? bounds.height / 2 : 7
             NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: radius, yRadius: radius).fill()
         }
+        super.draw(dirtyRect)
+    }
+    override func drawFocusRingMask() {
+        let radius: CGFloat = primary ? bounds.height / 2 : 7
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: radius, yRadius: radius).fill()
+    }
+    override var focusRingMaskBounds: NSRect { bounds }
+}
+
+/// One lightweight surface groups related controls. AppKit draws the material
+/// behind it; there is no hosted SwiftUI view, image, or animation task.
+final class ControlCard: NSStackView {
+    override func draw(_ dirtyRect: NSRect) {
+        let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 12, yRadius: 12)
+        NSColor.labelColor.withAlphaComponent(0.045).setFill(); shape.fill()
+        NSColor.separatorColor.withAlphaComponent(0.3).setStroke(); shape.lineWidth = 1; shape.stroke()
         super.draw(dirtyRect)
     }
 }
@@ -129,6 +149,7 @@ final class MusicTable: NSTableView {
     var activate: (() -> Void)?
     var togglePlayback: (() -> Void)?
     var goBack: (() -> Void)?
+    var rowMenu: ((Int) -> NSMenu?)?
     override func keyDown(with event: NSEvent) {
         guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
             super.keyDown(with: event); return
@@ -149,6 +170,12 @@ final class MusicTable: NSTableView {
         if clicked >= 0, selectedRow == clicked, ended == clicked, event.clickCount == 1,
            event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty { activate?() }
     }
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let index = row(at: convert(event.locationInWindow, from: nil))
+        guard index >= 0 else { return nil }
+        selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        return rowMenu?(index)
+    }
 }
 
 final class MusicRowView: NSTableRowView {
@@ -159,9 +186,17 @@ final class MusicRowView: NSTableRowView {
         let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
         addTrackingArea(area); tracking = area
         super.updateTrackingAreas()
+        hovered = window.map { $0.isKeyWindow && visibleRect.contains(convert($0.mouseLocationOutsideOfEventStream, from: nil)) } ?? false
+        updateActions()
     }
-    override func mouseEntered(with event: NSEvent) { hovered = true; needsDisplay = true }
-    override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
+    override var isSelected: Bool { didSet { updateActions() } }
+    override func didAddSubview(_ subview: NSView) { super.didAddSubview(subview); updateActions() }
+    override func mouseEntered(with event: NSEvent) { hovered = true; updateActions() }
+    override func mouseExited(with event: NSEvent) { hovered = false; updateActions() }
+    private func updateActions() {
+        for cell in subviews.compactMap({ $0 as? MusicCell }) { cell.showActions(hovered || isSelected) }
+        needsDisplay = true
+    }
     override func drawBackground(in dirtyRect: NSRect) {
         if hovered && !isSelected {
             NSColor.labelColor.withAlphaComponent(0.05).setFill()
@@ -174,48 +209,105 @@ final class MusicRowView: NSTableRowView {
     }
 }
 
+final class MusicGlyph: NSView {
+    private let image = NSImageView()
+    private var symbol = ""
+    var active = false { didSet { image.contentTintColor = active ? .controlAccentColor : .secondaryLabelColor; needsDisplay = true } }
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        image.translatesAutoresizingMaskIntoConstraints = false; addSubview(image)
+        NSLayoutConstraint.activate([
+            image.centerXAnchor.constraint(equalTo: centerXAnchor), image.centerYAnchor.constraint(equalTo: centerYAnchor),
+            image.widthAnchor.constraint(equalToConstant: 16), image.heightAnchor.constraint(equalToConstant: 16)
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+    func setSymbol(_ name: String) {
+        guard name != symbol else { return }; symbol = name
+        image.image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .regular))
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        (active ? NSColor.controlAccentColor : NSColor.labelColor).withAlphaComponent(active ? 0.12 : 0.045).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 7, yRadius: 7).fill()
+        super.draw(dirtyRect)
+    }
+}
+
 final class MusicCell: NSTableCellView {
     let title = NSTextField(labelWithString: "")
     let subtitle = NSTextField(labelWithString: "")
-    let icon = NSImageView()
+    let icon = MusicGlyph()
     let accessory = NSImageView()
+    let playActionButton = SymbolButton("play.fill", "Play", size: 26, pointSize: 11)
+    let addActionButton = SymbolButton("plus", "Add to playlist", size: 26, pointSize: 11)
+    var playAction: (() -> Void)?
+    var addAction: (() -> Void)?
+    private var showingActions = false
+    private var canPlay = false
+    private var canAdd = false
+    private var isCollection = false
+    private var isAdding = false
+    private var labelsTrailing: NSLayoutConstraint!
     override init(frame: NSRect) {
         super.init(frame: frame)
         title.font = .systemFont(ofSize: 13, weight: .medium)
         subtitle.font = .systemFont(ofSize: 11)
         subtitle.textColor = .secondaryLabelColor
         for label in [title, subtitle] { label.lineBreakMode = .byTruncatingTail }
-        for child in [title, subtitle, icon, accessory] {
+        for child in [title, subtitle, icon, accessory, playActionButton, addActionButton] {
             child.translatesAutoresizingMaskIntoConstraints = false; addSubview(child)
         }
-        icon.contentTintColor = .secondaryLabelColor
+        playActionButton.target = self; playActionButton.action = #selector(play(_:))
+        addActionButton.target = self; addActionButton.action = #selector(add(_:))
         accessory.contentTintColor = .tertiaryLabelColor
+        labelsTrailing = title.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -28)
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 20), icon.heightAnchor.constraint(equalToConstant: 20),
+            icon.widthAnchor.constraint(equalToConstant: 30), icon.heightAnchor.constraint(equalToConstant: 30),
             title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 10),
             title.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            title.trailingAnchor.constraint(equalTo: accessory.leadingAnchor, constant: -8),
+            labelsTrailing,
             subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 2),
             subtitle.trailingAnchor.constraint(equalTo: title.trailingAnchor),
             accessory.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             accessory.centerYAnchor.constraint(equalTo: centerYAnchor),
-            accessory.widthAnchor.constraint(equalToConstant: 12), accessory.heightAnchor.constraint(equalToConstant: 12)
+            accessory.widthAnchor.constraint(equalToConstant: 12), accessory.heightAnchor.constraint(equalToConstant: 12),
+            addActionButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            addActionButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            playActionButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -34),
+            playActionButton.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
-    func configure(_ row: Row, adding: Bool, current: Bool, playing: Bool) {
+    func configure(_ row: Row, adding: Bool, current: Bool, playing: Bool, loading: Bool = false, enabled: Bool = true) {
         var detail = row.subtitle
         for prefix in ["Playlist · ", "Album · "] where detail.hasPrefix(prefix) { detail.removeFirst(prefix.count) }
         setText(title, row.title); setText(subtitle, detail)
         title.textColor = current ? .controlAccentColor : .labelColor
-        icon.image = NSImage(systemSymbolName: row.browse != nil ? "square.stack" : "music.note", accessibilityDescription: nil)
-        let symbol = adding ? "plus" : (row.browse != nil ? "chevron.right" : (current && playing ? "speaker.wave.2.fill" : "play.fill"))
+        isCollection = row.browse != nil; isAdding = adding
+        icon.setSymbol(current ? (loading ? "ellipsis" : (playing ? "waveform" : "pause.fill")) : (isCollection ? "square.stack" : "music.note"))
+        icon.active = current
+        canPlay = !adding && row.play != nil; canAdd = !adding && row.video != nil
+        playActionButton.setSymbol(current && loading ? "stop.fill" : (current && playing ? "pause.fill" : "play.fill"), current && loading ? "Cancel loading" : (current && playing ? "Pause" : "Play \(row.title)"))
+        addActionButton.setSymbol("plus", "Add \(row.title) to playlist")
+        playActionButton.isEnabled = enabled; addActionButton.isEnabled = enabled
+        let symbol = adding ? "plus" : (isCollection ? "chevron.right" : (current && loading ? "ellipsis" : (current && playing ? "speaker.wave.2.fill" : "play.fill")))
         accessory.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         accessory.contentTintColor = current ? .controlAccentColor : .tertiaryLabelColor
         toolTip = row.title + (row.subtitle.isEmpty ? "" : "\n" + row.subtitle)
         setAccessibilityLabel(row.title + (row.subtitle.isEmpty ? "" : ", " + row.subtitle))
+        showActions(showingActions)
     }
+    func showActions(_ visible: Bool) {
+        showingActions = visible
+        playActionButton.isHidden = !visible || !canPlay
+        addActionButton.isHidden = !visible || !canAdd
+        accessory.isHidden = visible && (canPlay || canAdd) && !isCollection && !isAdding
+        labelsTrailing.constant = visible && (canPlay || canAdd) ? -66 : -28
+    }
+    @objc private func play(_ sender: Any?) { playAction?() }
+    @objc private func add(_ sender: Any?) { addAction?() }
 }

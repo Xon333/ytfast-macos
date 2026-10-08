@@ -4,11 +4,11 @@ YTfast is a lean native YouTube Music menu-bar player with one AppKit popover an
 
 ## Interface
 
-The 360-point AppKit popover sizes its content to the view: a compact connection screen, or up to six visible music rows with a scrolling list. Playback controls remain above the list. The circular Play/Pause control becomes Cancel while a start is pending; shuffle has a visible toggle state. Seek previews the position during dragging and commits on release. Volume includes mute/restore. Quit and secondary actions live in More (…).
+The 360-point AppKit popover sizes its content to the view: a compact connection screen, or up to six visible music rows with a scrolling list. A single player card groups transport, seek and volume above the list. The circular Play/Pause control becomes Cancel while a start is pending; shuffle has a visible toggle state. Seek previews the position during dragging and commits on release. Volume includes mute/restore. Quit and secondary actions live in More (…), including the saved Volume normalization toggle.
 
 **Search / Playlists / Liked / Albums** are direct destinations. Search displays local loading state immediately, waits 180 ms before a network request, and runs on Return. Selecting the current song uses transport rather than fetching its queue again. The small playlist index warms once after account connection; no audio/resolver process is started for browsing.
 
-Playlists, albums and search destinations open inline. Back restores their query and scroll position; closing/reopening preserves the current destination. Position ticks and unchanged warm opens do not rebuild the table. `NSTableView` instantiates reusable visible cells, not a view per song. Refresh retains the visible list while the account-scoped snapshot and HTTPS path run.
+Playlists, albums and search destinations open inline. One navigation row switches between library tabs and a collection's Back/title/Play actions. Back restores query and scroll position; closing/reopening preserves the current destination. Rows expose Play and Add on hover or selection, plus a context menu, without confusing selection with activation. Position ticks and unchanged warm opens do not rebuild the table. `NSTableView` instantiates reusable visible cells, not a view per song. Refresh retains the visible list while the account-scoped snapshot and HTTPS path run.
 
 Arrow keys select without playing. Return activates, Space controls playback, Escape goes back, Command-F focuses search and Command-R refreshes. Controls use native accessibility labels and dynamic system colors with explicit SF Symbol sizes and hover/selected states. No animation clock or per-row backing layers are added.
 
@@ -34,15 +34,21 @@ The optional `desktop-ui` target is separate from the Mac package.
 
 ## Playback path
 
-On selection, the current stream lookup, next-track lookup and mpv startup can proceed concurrently. Loudness/history metadata is fetched separately and does not gate stream readiness. A quick skip shares an existing next-track lookup.
+On selection of a known song, its stream lookup, authoritative queue request and mpv startup proceed concurrently. A preparation object owns the shared resolver request and player-start task across the queue handoff. The returned queue still selects the actual current song: a mismatched suggested video ID is discarded rather than played under different metadata. Playlist-only targets start mpv while the queue identifies their first song.
+
+Once the queue arrives, next-track preparation joins the current lookup. Loudness/history metadata is fetched separately and does not gate stream readiness. A quick skip shares an existing next-track lookup. Cancelling, replacing or rejecting a queue drops its pending preparation; each cold player attempt has its own socket. Player adoption reapplies the latest volume, including adjustments made during loading.
+
+mpv's eight property observations are submitted in one ordered IPC write, with every request ID/reply checked and all pending replies released on cancellation. Selection-to-playback timing includes queue latency; diagnostic stage timings distinguish queue readiness, stream/player readiness and accepted load. Actual mpv playback events determine completion. Buffer bounds and the reliable audio-output defaults are retained.
 
 Pause cancels a pending start while preserving its selected track and seek position. Playback, queue and account generations reject obsolete completions; actual mpv events determine loading, seeking and playing state. Account verification cancels pending starts and queued successors and blocks fresh playback until the connection is accepted. Already-loaded audio keeps its pause, seek and volume controls.
 
 The native path prepares the current and next track. It does not resolve visible library rows or fetch unused watch-next metadata. A saved queue is restored paused without starting mpv, yt-dlp or Deno.
 
-Premium-capable format selection is retained. The resolver scopes cached URLs to the selected browser session and discards them ten minutes before expiry. A matching session can reuse valid URLs across launches. mpv receives the selected stream directly and prepares the queued transition.
+The resolver uses yt-dlp's best audio selection with language, quality, source, codec and bitrate ordering. It accepts suffixed Premium formats and future audio format IDs, preserves original/default-language preference and avoids DRC variants when a better equivalent exists. Upstream Premium-aware client selection and account discovery remain intact. Only unusable DASH fragment-manifest extraction is skipped; direct HTTPS and HLS audio remain available.
 
-When enabled, loudness normalization uses YouTube's metadata with attenuation only; it never applies positive gain without peak-headroom evidence. This change does not alter codec or bitrate selection.
+The displayed codec/bitrate comes from the selected source's metadata rather than a fixed bitrate inferred from its itag. Sample rate, non-stereo channel count and format ID are available in the tooltip. Existing valid URL caches remain readable; entries without source metadata display only known codec/Premium information. The resolver scopes cached URLs and metadata to the selected browser session and only reuses URLs with more than ten minutes remaining. A matching session can reuse valid URLs across launches. mpv receives the selected stream directly and prepares the queued transition.
+
+When enabled, loudness normalization uses YouTube's metadata with attenuation only; it never applies positive gain without peak-headroom evidence. The native More menu now exposes this existing setting. It does not alter the selected codec or bitrate, transcode audio or impose additional compression.
 
 ## Resource bounds
 
@@ -80,9 +86,11 @@ Library snapshots and signed stream URLs use an opaque fingerprint of the profil
 
 Owned private directories use mode 0700; cookie exports and written cache files use 0600. The short runtime path accommodates Unix-domain sockets.
 
-There is no YTfast backend or telemetry. Authenticated traffic goes directly to YouTube/Google. Cookies, Safe Storage secrets, real-account captures and private logs must not enter Git or CI artifacts.
+There is no hosted YTfast server or telemetry. Authenticated traffic goes directly to YouTube/Google. Cookies, Safe Storage secrets, real-account captures and private logs must not enter Git or CI artifacts.
 
 ## Design provenance
+
+[Radio](https://github.com/pom11/Radio) informed the persistent compact player card; [MacControlCenterUI](https://github.com/orchetect/MacControlCenterUI) informed control grouping and toggle affordances; [Mino](https://github.com/nad-bit/Mino) informed reusable AppKit rows, inline actions and keyboard navigation. All three are MIT-licensed references. Their patterns are independently implemented here; their frameworks, sources and assets are not bundled.
 
 [Sonora](https://github.com/sonorahq/sonora) informed the existing playback preparation, snapshot and account-isolation design. YTfast keeps its own InnerTube/yt-dlp/mpv implementation.
 

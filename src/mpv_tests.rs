@@ -28,7 +28,9 @@ async fn native_audio_transport() {
     wav.resize(wav.len() + size as usize, 0);
     std::fs::write(&path, wav).unwrap();
     let (tx, mut events) = mpsc::unbounded_channel();
+    let spawned = Instant::now();
     let player = Mpv::spawn(&dir.join("mpv.sock"), 70.0, tx).await.unwrap();
+    let spawn_ms = spawned.elapsed().as_secs_f64() * 1_000.0;
     assert_eq!(player.get("options/input-media-keys").await.unwrap(), false);
     assert_eq!(
         player.get("options/demuxer-max-bytes").await.unwrap(),
@@ -39,7 +41,27 @@ async fn native_audio_transport() {
         1024 * 1024
     );
     let file = path.to_str().unwrap();
+    let loaded = Instant::now();
     let current_entry = player.load(file, "replace", &[]).await.unwrap();
+    let mut entries = std::collections::HashSet::new();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match events.recv().await.unwrap().1 {
+                MpvEvent::StartFile { entry } => {
+                    assert_eq!(entry, current_entry);
+                    assert!(entries.insert(entry));
+                }
+                MpvEvent::PlaybackRestart { entry } if entry == current_entry => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("local audio must reach the actual mpv playback-restart event");
+    println!(
+        "native PCM/null-output fixture: mpv startup {spawn_ms:.3} ms; load-to-restart {:.3} ms",
+        loaded.elapsed().as_secs_f64() * 1_000.0
+    );
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(player.get("time-pos").await.unwrap().as_f64().unwrap() > 0.0);
     player.set("pause", json!(true)).await.unwrap();
@@ -64,8 +86,7 @@ async fn native_audio_transport() {
     player.set("playlist-pos", json!(1)).await.unwrap();
     player.set("playlist-pos", json!(1)).await.unwrap();
     player.set("pause", json!(false)).await.unwrap();
-    let mut starts = 0;
-    let mut entries = std::collections::HashSet::new();
+    let mut starts = entries.len();
     let deadline = Instant::now() + Duration::from_secs(12);
     while starts < 3 && Instant::now() < deadline {
         if let Ok(Some((_, MpvEvent::StartFile { entry }))) =
@@ -141,5 +162,66 @@ async fn lost_ipc_reply_fails_immediately_and_releases_state() {
         .unwrap()
         .unwrap();
     assert!(result.unwrap_err().to_string().contains("mpv closed"));
+    assert!(player.pending.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn observation_batch_has_no_reply_dependencies_and_matches_out_of_order_replies() {
+    let (socket, peer) = UnixStream::pair().unwrap();
+    let (_reader, writer) = socket.into_split();
+    let child = tokio::process::Command::new("/usr/bin/true")
+        .spawn()
+        .unwrap();
+    let player = Arc::new(Mpv {
+        serial: 0,
+        writer: Mutex::new(writer),
+        next_id: AtomicU64::new(1),
+        pending: Arc::default(),
+        _child: child,
+    });
+    let observations: Vec<_> = OBSERVED
+        .iter()
+        .enumerate()
+        .map(|(i, name)| json!(["observe_property", i + 1, name]))
+        .collect();
+    let copy = player.clone();
+    let commands = observations.clone();
+    let task = tokio::spawn(async move { copy.commands(&commands).await });
+    let mut peer = BufReader::new(peer).lines();
+    let mut received = Vec::new();
+    for _ in 0..observations.len() {
+        let line = tokio::time::timeout(Duration::from_secs(1), peer.next_line())
+            .await
+            .expect("all observations must be written before any reply is needed")
+            .unwrap()
+            .unwrap();
+        received.push(serde_json::from_str::<Value>(&line).unwrap());
+    }
+    // The peer deliberately withholds replies until the entire batch arrives,
+    // then answers in reverse order. Neither can stall or misroute a command.
+    for request in received.into_iter().rev() {
+        let sender = player
+            .pending
+            .lock()
+            .unwrap()
+            .remove(&request["request_id"].as_u64().unwrap())
+            .unwrap();
+        sender
+            .send(json!({"error": "success", "data": request["command"]}))
+            .unwrap();
+    }
+    assert_eq!(task.await.unwrap().unwrap(), observations);
+    assert!(player.pending.lock().unwrap().is_empty());
+
+    // Cancellation of a batch must release every waiter, including replies
+    // after the first one, using the same guards as an individual command.
+    let copy = player.clone();
+    let task = tokio::spawn(async move { copy.commands(&observations).await });
+    for _ in 0..OBSERVED.len() {
+        assert!(peer.next_line().await.unwrap().is_some());
+    }
+    assert_eq!(player.pending.lock().unwrap().len(), OBSERVED.len());
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
     assert!(player.pending.lock().unwrap().is_empty());
 }
