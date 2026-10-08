@@ -44,7 +44,7 @@ async fn native_audio_transport() {
     ] {
         assert_eq!(player.get(&format!("options/{name}")).await.unwrap(), false);
     }
-    assert_eq!(player.get("options/gapless-audio").await.unwrap(), "yes");
+    assert_eq!(player.get("options/gapless-audio").await.unwrap(), true);
     assert_eq!(
         player.get("options/demuxer-max-bytes").await.unwrap(),
         4 * 1024 * 1024
