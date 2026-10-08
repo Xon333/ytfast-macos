@@ -40,6 +40,8 @@ OLED-black surfaces use [Oxocarbon](https://github.com/nyoom-engineering/oxocarb
 
 To install it in Applications, quit YTfast and copy `dist/YTfast.app` into `/Applications`, replacing any previous version.
 
+For build internals, see [architecture](docs/MACOS.md) and [contributor guidance](AGENTS.md).
+
 The app is ad-hoc signed, not notarized. If macOS blocks it, use **System Settings → Privacy & Security → Open Anyway**.
 
 ## Connect YouTube Music
