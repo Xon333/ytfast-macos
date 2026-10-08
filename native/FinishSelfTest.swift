@@ -61,8 +61,8 @@ func finishSelfTest() {
     lightHost.appearance = NSAppearance(named: .aqua)
     lightHost.contentView = panel.view
     precondition(panel.view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua, "product must stay dark under a light host")
-    precondition(panel.seek.trackFillColor == NativeTheme.accent && panel.volume.trackFillColor == NativeTheme.accent)
-    precondition(panel.playButton.baseColor == NativeTheme.base, "primary glyph must contrast with lavender fill")
+    precondition(panel.seek.trackFillColor == NativeTheme.text && panel.volume.trackFillColor == NativeTheme.text)
+    precondition(panel.playButton.baseColor == NativeTheme.base, "primary glyph must contrast with white fill")
     lightHost.contentView = nil; lightHost.orderOut(nil)
     controller.dismissal.stop()
     NSStatusBar.system.removeStatusItem(controller.status)

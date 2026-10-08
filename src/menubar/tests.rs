@@ -145,6 +145,7 @@ fn snapshot_fixture(pages: Option<Vec<&MenuPage>>) -> MenuSnapshot<'_> {
         volume: 70.0,
         shuffle: true,
         format: Some("Opus 256 kbps"),
+        source: Some("Late nights"),
         normalize: true,
         signed_in: true,
         account_checking: false,
@@ -190,7 +191,7 @@ fn borrowed_snapshot_preserves_native_wire_contract() {
     let expected = json!({
         "track": {"id": "abcdefghijk", "title": "Night \"Live\"\n夜\0", "artist": "Fixture artist"},
         "playing": true, "loading": false, "position": 12.5, "duration": 180.0,
-        "volume": 70.0, "shuffle": true, "format": "Opus 256 kbps", "normalize": true,
+        "volume": 70.0, "shuffle": true, "format": "Opus 256 kbps", "source": "Late nights", "normalize": true,
         "signed_in": true, "account_checking": false, "account_unverified": false,
         "account": "Fixture · Chrome", "profile": "fixture/default",
         "profiles": [{"id": "fixture/default", "label": "Chrome · Test profile"}],
@@ -198,7 +199,7 @@ fn borrowed_snapshot_preserves_native_wire_contract() {
             "key": "browse:fixture:", "target": "fixture target", "title": "Fixture playlist",
             "rows": [{"title": "A song", "subtitle": "An artist", "play": "fixture play",
                 "browse": null, "video": "abcdefghijk", "editable": null}],
-            "play": null, "loading": true, "more": true, "message": null
+            "play": null, "shuffle": null, "loading": true, "more": true, "message": null
         }],
         "notice": "Added to playlist", "error": null, "adding": false, "show": true, "quit": false
     });
@@ -227,7 +228,7 @@ fn owned_snapshot(snapshot: &MenuSnapshot<'_>) -> String {
     json!({
         "track": snapshot.track, "playing": snapshot.playing, "loading": snapshot.loading,
         "position": snapshot.position, "duration": snapshot.duration, "volume": snapshot.volume,
-        "shuffle": snapshot.shuffle, "format": snapshot.format, "normalize": snapshot.normalize,
+        "shuffle": snapshot.shuffle, "format": snapshot.format, "source": snapshot.source, "normalize": snapshot.normalize,
         "signed_in": snapshot.signed_in, "account_checking": snapshot.account_checking,
         "account_unverified": snapshot.account_unverified, "account": snapshot.account,
         "profile": snapshot.profile, "profiles": snapshot.profiles, "pages": pages,
@@ -295,4 +296,55 @@ fn snapshot_serialization_benchmark() {
             "borrowed_ms_per_snapshot": borrowed.as_secs_f64() * 1000.0 / f64::from(iterations)
         })
     );
+}
+
+#[test]
+fn native_collection_actions_reuse_the_server_shuffle_target() {
+    let play = Target::Watch {
+        video_id: None,
+        playlist_id: Some("PLfixture".into()),
+        params: None,
+    };
+    let shuffle = Target::Watch {
+        video_id: Some("abcdefghijk".into()),
+        playlist_id: Some("PLfixture".into()),
+        params: Some("server-shuffle".into()),
+    };
+    let mut entry = PageEntry::new(Target::browse("VLPLfixture"), 1);
+    entry.replace(
+        Page {
+            header: Some(crate::model::Header {
+                play: Some(play),
+                shuffle: Some(shuffle.clone()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        false,
+    );
+    let encoded = serde_json::to_string(&shuffle).unwrap();
+    assert_eq!(entry.page.shuffle.as_deref(), Some(encoded.as_str()));
+    entry.replace(Page::default(), false);
+    assert!(entry.page.shuffle.is_none());
+    let request: Request = serde_json::from_str(
+        r#"{"op":"play","target":"fixture","source":"Late nights","shuffle":true}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        request,
+        Request::Play {
+            source: Some(_),
+            shuffle: Some(true),
+            ..
+        }
+    ));
+    let legacy: Request = serde_json::from_str(r#"{"op":"play","target":"fixture"}"#).unwrap();
+    assert!(matches!(
+        legacy,
+        Request::Play {
+            source: None,
+            shuffle: None,
+            ..
+        }
+    ));
 }

@@ -10,33 +10,41 @@ final class SymbolButton: MenuActionButton {
         didSet {
             if oldValue != isOn {
                 baseColor = primary ? NativeTheme.base : (isOn ? NativeTheme.accent : NativeTheme.text)
-                hoverColor = baseColor
+                hoverColor = primary ? NativeTheme.base : NativeTheme.text
                 needsDisplay = true
             }
         }
     }
 
-    init(_ symbol: String, _ label: String, size: CGFloat = 30, pointSize: CGFloat = 13, primary: Bool = false) {
+    init(_ symbol: String, _ label: String, size: CGFloat = 30, pointSize: CGFloat = 13, primary: Bool = false, caption: String? = nil) {
         self.primary = primary
         self.symbolSize = pointSize
         super.init(frame: .zero)
-        title = ""
+        title = caption ?? ""
+        font = .systemFont(ofSize: 11, weight: .medium)
         isBordered = false
         bezelStyle = .regularSquare
-        imagePosition = .imageOnly
+        imagePosition = caption == nil ? .imageOnly : .imageLeading
         imageScaling = .scaleNone
-        focusRingType = .exterior
+        focusRingType = .none
         setButtonType(.momentaryChange)
         translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: size),
-            heightAnchor.constraint(equalToConstant: size)
-        ])
+        heightAnchor.constraint(equalToConstant: size).isActive = true
+        if caption == nil {
+            widthAnchor.constraint(equalTo: heightAnchor).isActive = true
+        } else {
+            widthAnchor.constraint(greaterThanOrEqualToConstant: size).isActive = true
+        }
+        setContentHuggingPriority(.required, for: .vertical)
+        setContentCompressionResistancePriority(.required, for: .vertical)
         baseColor = primary ? NativeTheme.base : NativeTheme.text
-        hoverColor = baseColor
+        hoverColor = primary ? NativeTheme.base : NativeTheme.text
         setSymbol(symbol, label)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+    // These controls paint their own bezel; do not inherit NSButton's unequal
+    // optical insets, which can stretch a square Auto Layout alignment rect.
+    override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0) }
 
     func setSymbol(_ symbol: String, _ label: String) {
         if symbolName != symbol {
@@ -46,20 +54,35 @@ final class SymbolButton: MenuActionButton {
         }
         if toolTip != label { toolTip = label; setAccessibilityLabel(label) }
     }
+    /// A circle uses its smaller dimension, not a stretched rounded bezel.
+    /// This also protects drawing if a host scales the native button's frame.
+    var shapeBounds: NSRect {
+        if !primary { return bounds.insetBy(dx: 1, dy: 1) }
+        let side = max(0, min(bounds.width, bounds.height) - 2)
+        return NSRect(x: bounds.midX - side / 2, y: bounds.midY - side / 2, width: side, height: side)
+    }
+    private var shape: NSBezierPath {
+        primary ? NSBezierPath(ovalIn: shapeBounds) : NSBezierPath(roundedRect: shapeBounds, xRadius: 7, yRadius: 7)
+    }
     override func draw(_ dirtyRect: NSRect) {
         let pressed = cell?.isHighlighted == true
-        if primary || isOn || (isEnabled && (isHovered || pressed)) {
-            let fill = primary || isOn ? NativeTheme.accent : NativeTheme.text
-            fill.withAlphaComponent(primary ? (isEnabled ? (pressed ? 0.75 : 1) : 0.3) : (pressed ? 0.24 : (isOn ? 0.15 : 0.07))).setFill()
-            let radius: CGFloat = primary ? bounds.height / 2 : 7
-            NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: radius, yRadius: radius).fill()
+        if primary {
+            NativeTheme.text.withAlphaComponent(isEnabled ? (pressed ? 0.75 : 1) : 0.3).setFill()
+            shape.fill()
+        } else if isOn || (isEnabled && (isHovered || pressed)) {
+            (isOn ? NativeTheme.accent.withAlphaComponent(0.18) : NativeTheme.hover).setFill()
+            shape.fill()
+            (isOn ? NativeTheme.accent : NativeTheme.secondary).setStroke()
+            shape.lineWidth = 1; shape.stroke()
         }
         super.draw(dirtyRect)
+        if window?.firstResponder === self {
+            NativeTheme.text.setStroke(); shape.lineWidth = 2; shape.stroke()
+        }
     }
-    override func drawFocusRingMask() {
-        let radius: CGFloat = primary ? bounds.height / 2 : 7
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: radius, yRadius: radius).fill()
-    }
+    override func becomeFirstResponder() -> Bool { let accepted = super.becomeFirstResponder(); needsDisplay = true; return accepted }
+    override func resignFirstResponder() -> Bool { let accepted = super.resignFirstResponder(); needsDisplay = true; return accepted }
+    override func drawFocusRingMask() { shape.fill() }
     override var focusRingMaskBounds: NSRect { bounds }
 }
 
@@ -187,7 +210,7 @@ final class MusicRowView: NSTableRowView {
     }
     override func drawBackground(in dirtyRect: NSRect) {
         if hovered && !isSelected {
-            NativeTheme.surface.setFill()
+            NativeTheme.hover.setFill()
             NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 1), xRadius: 6, yRadius: 6).fill()
         }
     }
@@ -270,7 +293,7 @@ final class MusicCell: NSTableCellView {
         ])
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
-    func configure(_ row: Row, adding: Bool, current: Bool, playing: Bool, loading: Bool = false, enabled: Bool = true) {
+    func configure(_ row: Row, adding: Bool, current: Bool, playing: Bool, loading: Bool = false, enabled: Bool = true, shuffled: Bool = false) {
         var detail = row.subtitle
         for prefix in ["Playlist · ", "Album · "] where detail.hasPrefix(prefix) { detail.removeFirst(prefix.count) }
         setText(title, row.title); setText(subtitle, detail)
@@ -280,6 +303,7 @@ final class MusicCell: NSTableCellView {
         icon.active = current
         canPlay = !adding && row.play != nil; canAdd = !adding && row.video != nil
         playActionButton.setSymbol(current && loading ? "stop.fill" : (current && playing ? "pause.fill" : "play.fill"), current && loading ? "Cancel loading" : (current && playing ? "Pause" : "Play \(row.title)"))
+        if isCollection && shuffled { playActionButton.setSymbol("shuffle", "Shuffle \(row.title)") }
         addActionButton.setSymbol("plus", "Add \(row.title) to playlist")
         playActionButton.isEnabled = enabled; addActionButton.isEnabled = enabled
         let symbol = adding ? "plus" : (isCollection ? "chevron.right" : (current && loading ? "ellipsis" : (current && playing ? "speaker.wave.2.fill" : "play.fill")))

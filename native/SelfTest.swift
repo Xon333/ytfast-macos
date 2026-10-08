@@ -46,6 +46,9 @@ func selfTest() {
     panel.sizeChanged = { [weak window] size in window?.setContentSize(size) }
     window.contentView = panel.view; window.appearance = NSAppearance(named: .darkAqua)
     window.makeKeyAndOrderFront(nil); panel.opened(); panel.view.layoutSubtreeIfNeeded()
+    verify(!panel.browserExpanded && panel.rows.isEmpty && panel.search.isHidden, "first open must be compact")
+    verify(api.sent.allSatisfy { $0["op"] as? String != "browse" }, "startup must not warm hidden catalogues")
+    panel.selectLibrary(0); panel.view.layoutSubtreeIfNeeded()
     // NSButton.performClick runs AppKit's event loop. Drain the connection's
     // already-queued playlist warm-up before measuring this particular action.
     // The barrier stops this one run-loop turn; it does not sleep or poll.
@@ -66,8 +69,8 @@ func selfTest() {
     api.state.pages = [fixture, nestedFixture]; controller.refresh()
     panel.navigate(Location.from(nestedFixture.target, title: nestedFixture.title)!)
     let collectionHeight = panel.preferredContentSize.height
-    verify(collectionHeight == playerLibraryHeight, "collection navigation must replace the sections row instead of adding another row")
-    verify(panel.sections.isHidden && !panel.pagePlay.isHidden, "collection navigation at \(panel.location.key): sectionsHidden=\(panel.sections.isHidden), playHidden=\(panel.pagePlay.isHidden), pageHasPlay=\(panel.pages[panel.location.key]?.play != nil)")
+    verify(collectionHeight == playerLibraryHeight + 38, "only the collection breadcrumb/actions should add a row")
+    verify(!panel.destinations.isHidden && !panel.pagePlay.isHidden && !panel.pageShuffle.isHidden, "collection navigation at \(panel.location.key): playHidden=\(panel.pagePlay.isHidden), pageHasPlay=\(panel.pages[panel.location.key]?.play != nil)")
     panel.back(nil); api.state.pages = [fixture]; controller.refresh()
     verify(panel.makeMoreMenu().items.first?.state == .on)
     panel.toggleNormalization(nil)
@@ -137,6 +140,7 @@ func selfTest() {
     api.state.signed_in = true; api.state.account_checking = false
     api.state.account = "Demo · Chrome"; api.state.pages = [fixture]
     controller.refresh(); panel.navigate(.library(0), remember: false)
+    panel.collapseBrowser()
     let warmReloads = panel.reloadCount
     let warmBegan = CFAbsoluteTimeGetCurrent()
     for _ in 0..<30 { panel.closed(); panel.opened() }
@@ -147,16 +151,17 @@ func selfTest() {
     for _ in 0..<100 { api.state.position += 0.25; controller.refresh() }
     verify(panel.reloadCount == warmReloads, "position ticks must not rebuild the library")
 
+    panel.selectLibrary(0)
     panel.search.stringValue = "find album"; panel.searchNow(nil)
     let searchLocation = panel.location
     let album = Location.from(browseTarget("MPREfixture"), title: "An album")!
     panel.navigate(album)
     panel.closed(); panel.opened()
     verify(panel.location.key == album.key, "reopening a search destination must not rerun the old query")
-    verify(panel.sections.selectedSegment == -1, "search descendants must not claim to be a library section")
+    verify(!panel.browserExpanded && panel.libraryButtons.allSatisfy { !$0.isOn }, "reopening a collection stays collapsed")
     panel.back(nil)
     verify(panel.location.key == searchLocation.key && panel.search.stringValue == "find album", "Back restores the query")
-    verify(panel.sections.selectedSegment == -1, "search results are not a library section")
+    verify(panel.searchButton.isOn && panel.libraryButtons.allSatisfy { !$0.isOn }, "search results are not a library section")
     panel.back(nil)
     verify(panel.location.key == playlistKey)
     verify(panel.table.action == nil, "selection and arrow keys must never dispatch playback")
@@ -203,7 +208,12 @@ func selfTest() {
     let requestsBeforeStaleAction = api.sent.count
     panel.rowMenuAction(staleRowAction)
     verify(api.sent.count == requestsBeforeStaleAction, "a context-menu action must not survive an account boundary")
+    panel.focusSearch(); panel.search.stringValue = "fixture"; panel.searchNow(nil)
+    let tabLocation = panel.location
+    api.state.pages = [Page(key: tabLocation.key, target: tabLocation.target, title: "Search", rows: fixture.rows, loading: false, more: false)]
+    controller.refresh()
     let editor = NSTextView()
+    verify(!panel.search.isHidden && !panel.rows.isEmpty)
     verify(panel.control(panel.search, textView: editor, doCommandBy: NSSelectorFromString("insertTab:")))
     verify(window.firstResponder === panel.table, "Tab from search must enter the music list")
     panel.showAccount(nil); verify(panel.showingAccount && panel.search.isHidden)
@@ -212,7 +222,7 @@ func selfTest() {
     api.state.track = nil; api.state.pages = nil; controller.refresh()
     let idleHeight = panel.preferredContentSize.height
     api.state.loading = true; controller.refresh()
-    verify(!panel.playButton.isHidden && panel.preferredContentSize.height > idleHeight, "a first-ever pending start must expose Cancel")
+    verify(!panel.playButton.isHidden && panel.playButton.isEnabled && panel.preferredContentSize.height == idleHeight, "a pending start must expose Cancel without resizing")
     api.state.loading = false; controller.refresh()
 
     // Drive text changes synchronously; no sleeps or assumptions about the
@@ -225,7 +235,7 @@ func selfTest() {
     func libraryRoot() {
         window.makeFirstResponder(panel.table)
         api.state.pages = [fixture]; controller.refresh()
-        panel.sections.selectedSegment = 0; panel.changeSection(panel.sections)
+        panel.selectLibrary(0)
     }
     func searchPage(_ location: Location, rows: [Row] = [], loading: Bool = false) -> Page {
         Page(key: location.key, target: location.target, title: "Search", rows: rows, loading: loading, more: false)
@@ -233,6 +243,9 @@ func selfTest() {
     api.state.track = Song(id: "abcdefghijk", title: "Night Drive", artist: "YTfast demo")
     api.state.playing = true; api.state.duration = 240; api.state.position = 62
     libraryRoot()
+    panel.focusSearch()
+    // Entering Search is one deliberate expansion. Loading/results then stay stable.
+    typeSearch("D")
     let searchHeight = panel.preferredContentSize.height
     let beforeTyping = browseCount()
     var draft = ""
@@ -290,13 +303,13 @@ func selfTest() {
     let likedLocation = Location.library(1)
     let likedPage = Page(key: likedLocation.key, target: likedLocation.target, title: "Liked Music", rows: [Row(title: "Night Drive", subtitle: "YTfast demo", play: songTarget, video: "abcdefghijk")], loading: false, more: false)
     api.state.pages = [fixture, likedPage]; controller.refresh()
-    panel.sections.selectedSegment = 1; panel.changeSection(panel.sections)
+    panel.selectLibrary(1)
     let writesBeforeSearch = api.sent.filter { $0["op"] as? String == "add" }.count
     panel.addSong(nil); verify(panel.location.song != nil && panel.search.isHidden)
     panel.focusSearch()
     verify(panel.location.key == likedLocation.key && panel.location.song == nil && !panel.search.isHidden && panel.search.currentEditor() != nil, "Command-F must restore browsing and focus visible search from Add")
     verify(api.sent.filter { $0["op"] as? String == "add" }.count == writesBeforeSearch, "leaving Add for search must not write account data")
-    panel.view.layoutSubtreeIfNeeded()
+    panel.selectLibrary(1); panel.view.layoutSubtreeIfNeeded()
     let availableCell = panel.table.view(atColumn: 0, row: 0, makeIfNecessary: true) as! MusicCell
     availableCell.showActions(true)
     let availabilityReloads = panel.reloadCount
@@ -338,10 +351,13 @@ func selfTest() {
         api.state.signed_in = true; api.state.account = "Demo · Chrome"; api.state.pages = [fixture]
         api.state.track = Song(id: "abcdefghijk", title: "Night Drive", artist: "YTfast demo")
         api.state.playing = true; api.state.position = 62; api.state.volume = 70
-        api.state.format = "Opus 256 kbps · Premium (itag 774)"; controller.refresh()
+        api.state.format = "Opus 256 kbps · Premium (itag 774)"; api.state.source = "Late nights"; controller.refresh()
+        panel.collapseBrowser()
         capture("player-dark.png", appearance: .darkAqua)
         capture("player-light.png", appearance: .aqua)
-        verify(panel.sections.frame.width >= 280, "root library sections must fill the available row; actual width \(panel.sections.frame.width) pt")
+        verify(panel.destinations.frame.width >= 320, "destination buttons must fill the compact row")
+        panel.selectLibrary(0); panel.view.layoutSubtreeIfNeeded()
+        capture("library-dark.png", appearance: .darkAqua)
         panel.table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         capture("player-actions-dark.png", appearance: .darkAqua)
         panel.table.deselectAll(nil)
@@ -351,7 +367,7 @@ func selfTest() {
         api.state.pages = [fixture, Page(key: "browse:VLPLowned:", target: browseTarget("VLPLowned"), title: "Late nights", rows: (0..<8).map { Row(title: "Song \($0 + 1)", subtitle: "Artist name", play: songTarget, video: "fixture\($0)") }, play: songTarget, loading: false, more: false)]
         controller.refresh(); panel.navigate(Location.from(browseTarget("VLPLowned"), title: "Late nights")!)
         capture("playlist-dark.png", appearance: .darkAqua)
-        verify(panel.sections.isHidden && !panel.pagePlay.isHidden, "nested navigation must keep collection playback accessible")
+        verify(!panel.destinations.isHidden && !panel.pagePlay.isHidden && !panel.pageShuffle.isHidden, "nested navigation must keep collection playback accessible")
         verify(panel.reconnectButton.frame.height == 28 && panel.reconnectButton.frame.width >= 100, "Connect needs a clear native hit area")
         for control in [panel.playButton, panel.previousButton, panel.nextButton, panel.shuffleButton, panel.addButton] {
             let frame = control.convert(control.bounds, to: panel.view)
@@ -374,7 +390,7 @@ func selfTest() {
         capture("search-empty-dark.png", appearance: .darkAqua)
     }
     panel.closed(); window.orderOut(nil)
-    let result: [String: Any] = ["result": "pass", "checks": ["prelaunch_wake", "one_status_item", "native_popover", "shuffle", "seek", "editable_only", "captured_song", "1000_scrollable_rows", "visible_cell_reuse", "refresh_preserves_content", "loading_can_pause", "search_dedup", "stale_result_navigation", "signed_out_gating", "actionable_signin", "reconnect_progress", "connecting_transport_gating", "single_profile_label", "missing_profile_not_substituted", "first_load_exposes_cancel", "warm_open_no_reload", "position_ticks_no_reload", "reopen_preserves_destination", "back_restores_search", "search_section_state", "selection_is_not_playback", "seek_tracking_stability", "seek_accounting_for_track_change", "volume_tracking_stability", "mute_restores_volume", "current_song_uses_transport", "inline_account", "search_focus_from_account", "control_hit_areas", "search_descendant_section_state", "library_section_sizing", "connect_hit_area", "inline_collection_play", "single_collection_navigation_row", "normalization_state_dispatch", "row_add_captures_song", "stale_row_action_account_boundary", "search_tab_navigation", "search_preserves_typed_spaces", "search_loading_viewport_stable", "search_history_preserves_draft", "marked_text_not_submitted", "marked_text_survives_snapshot", "search_back_resumes_debounce", "search_focus_resumes_debounce", "search_exits_add_without_write", "row_availability_without_reload", "reused_button_hover_reset"], "warm_open_ms": warmOpenMilliseconds, "warm_open_reloads": warmReloadDelta, "render_1000_rows_ms": renderMilliseconds, "instantiated_rows": liveRows, "player_library_height_pt": playerLibraryHeight, "collection_height_pt": collectionHeight]
+    let result: [String: Any] = ["result": "pass", "checks": ["prelaunch_wake", "one_status_item", "native_popover", "shuffle", "seek", "editable_only", "captured_song", "1000_scrollable_rows", "visible_cell_reuse", "refresh_preserves_content", "loading_can_pause", "search_dedup", "stale_result_navigation", "signed_out_gating", "actionable_signin", "reconnect_progress", "connecting_transport_gating", "single_profile_label", "missing_profile_not_substituted", "first_load_exposes_cancel", "warm_open_no_reload", "position_ticks_no_reload", "reopen_collapsed_preserves_internal_destination", "back_restores_search", "search_section_state", "selection_is_not_playback", "seek_tracking_stability", "seek_accounting_for_track_change", "volume_tracking_stability", "mute_restores_volume", "current_song_uses_transport", "inline_account", "search_focus_from_account", "control_hit_areas", "search_descendant_section_state", "compact_destination_sizing", "connect_hit_area", "inline_collection_play", "collection_breadcrumb_and_actions", "normalization_state_dispatch", "row_add_captures_song", "stale_row_action_account_boundary", "search_tab_navigation", "search_preserves_typed_spaces", "search_loading_viewport_stable", "search_history_preserves_draft", "marked_text_not_submitted", "marked_text_survives_snapshot", "search_back_resumes_debounce", "search_focus_resumes_debounce", "search_exits_add_without_write", "row_availability_without_reload", "reused_button_hover_reset"], "warm_open_ms": warmOpenMilliseconds, "warm_open_reloads": warmReloadDelta, "render_1000_rows_ms": renderMilliseconds, "instantiated_rows": liveRows, "player_library_height_pt": playerLibraryHeight, "collection_height_pt": collectionHeight]
     print(String(decoding: try! JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]), as: UTF8.self))
     NSStatusBar.system.removeStatusItem(controller.status)
 }

@@ -58,6 +58,9 @@ jobs:
           cargo test --locked --release --no-default-features --features menubar --lib snapshot_serialization -- --ignored --nocapture
           scripts/build-macos.sh
           scripts/smoke-macos.sh
+      - if: runner.os == 'macOS' && github.head_ref == 'ui/compact-oxocarbon-20261008'
+        name: Same-runner compact native memory comparison
+        run: scripts/compare-native-memory.sh
       - if: always() && runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:

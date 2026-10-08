@@ -1,5 +1,19 @@
 use super::*;
 
+/// Explicit song selection stays authoritative. A shuffled whole collection
+/// starts at a random member of the returned queue, not always its first song.
+/// Queue::shuffle below owns the remaining order and reversible list context.
+fn initial_position(target: Option<&Target>, shuffled: bool, current: usize, count: usize) -> usize {
+    if shuffled
+        && count > 0
+        && matches!(target, Some(Target::Watch { video_id: None, .. }))
+    {
+        fastrand::usize(..count)
+    } else {
+        current
+    }
+}
+
 pub(super) enum StartError {
     Player(anyhow::Error),
     Stream(anyhow::Error),
@@ -926,8 +940,13 @@ impl super::Worker {
                 );
                 match result {
                     Ok(info) => {
+                        let start = initial_position(
+                            self.pending_target.as_ref(),
+                            self.state.shuffle,
+                            info.current,
+                            info.tracks.len(),
+                        );
                         self.pending_target = None;
-                        let start = info.current;
                         self.set_queue(info.tracks, start);
                         if let Some(pos) = self.pos {
                             self.start_prepared(pos, None, Some(preparation)).await;
@@ -1399,6 +1418,29 @@ mod tests {
             super::super::Worker::new(Arc::new(Client::new()), resolver, paths, sink),
             Scratch(root),
         )
+    }
+
+    #[test]
+    fn shuffle_start_respects_explicit_songs_and_randomizes_collections() {
+        let collection = Target::Watch {
+            video_id: None,
+            playlist_id: Some("PLfixture".into()),
+            params: None,
+        };
+        let song = Target::Watch {
+            video_id: Some("selected".into()),
+            playlist_id: Some("PLfixture".into()),
+            params: None,
+        };
+        assert_eq!(initial_position(Some(&collection), false, 3, 8), 3);
+        assert_eq!(initial_position(Some(&song), true, 3, 8), 3);
+        assert_eq!(initial_position(Some(&collection), true, 0, 0), 0);
+        fastrand::seed(42);
+        let positions: std::collections::HashSet<_> = (0..64)
+            .map(|_| initial_position(Some(&collection), true, 0, 8))
+            .collect();
+        assert!(positions.len() > 1);
+        assert!(positions.iter().all(|&p| p < 8));
     }
 
     fn track(id: &str) -> Track {

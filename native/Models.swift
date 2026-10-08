@@ -10,12 +10,12 @@ struct Row: Codable, Equatable {
 }
 struct Page: Codable, Equatable {
     var key: String; var target: String; var title: String; var rows: [Row]
-    var play: String?; var loading: Bool; var more: Bool; var message: String?
+    var play: String?; var shuffle: String?; var loading: Bool; var more: Bool; var message: String?
 }
 struct State: Codable {
     var track: Song?; var playing = false; var loading = false
     var position = 0.0; var duration = 0.0; var volume = 70.0; var shuffle = false; var normalize = true
-    var format: String?; var signed_in = false; var account_checking = true; var account_unverified = false
+    var format: String?; var source: String?; var signed_in = false; var account_checking = true; var account_unverified = false
     var account = "Connecting…"; var profiles: [Profile] = []; var profile: String?
     var pages: [Page]?; var notice: String?; var error: String?
     var adding = false; var show = false; var quit = false

@@ -12,6 +12,8 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
     private(set) var rows: [Row] = []
     private(set) var reloadCount = 0
     private(set) var showingAccount = false
+    private(set) var browserExpanded = false
+    private(set) var searchExpanded = false
     private var history: [Location] = []
     private var libraryIndex = 0
     private var visible = false
@@ -30,12 +32,13 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
     private var accountGeneration = 0
     private var browserError: String?
 
+    let sourceLabel = NSTextField(labelWithString: "")
     let titleLabel = NSTextField(labelWithString: "YTfast")
     let artistLabel = NSTextField(labelWithString: "Choose a song")
-    let playButton = SymbolButton("play.fill", "Play", size: 38, pointSize: 16, primary: true)
+    let playButton = SymbolButton("play.fill", "Play", size: 36, pointSize: 15, primary: true)
     let previousButton = SymbolButton("backward.end.fill", "Previous", size: 28, pointSize: 13)
     let nextButton = SymbolButton("forward.end.fill", "Next", size: 28, pointSize: 13)
-    let shuffleButton = SymbolButton("shuffle", "Shuffle", size: 28)
+    let shuffleButton = SymbolButton("shuffle", "Shuffle off", size: 28, pointSize: 11, caption: "Shuffle off")
     let addButton = SymbolButton("plus", "Add to playlist", size: 28)
     let muteButton = SymbolButton("speaker.wave.2", "Mute", size: 24, pointSize: 12)
     let seek = ValueSlider(value: 0, maximum: 1)
@@ -45,11 +48,16 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
     private let playbackStatus = NSTextField(labelWithString: "")
     private let playbackSpinner = NSProgressIndicator()
     let search = NSSearchField()
-    let sections = NSSegmentedControl(labels: ["Playlists", "Liked", "Albums"], trackingMode: .selectOne, target: nil, action: nil)
+    let searchButton = SymbolButton("magnifyingglass", "Search", size: 30, pointSize: 11, caption: "Search")
+    let libraryButtons = [SymbolButton("music.note.list", "Playlists", size: 30, pointSize: 11, caption: "Playlists"),
+                          SymbolButton("heart", "Liked", size: 30, pointSize: 11, caption: "Liked"),
+                          SymbolButton("square.stack", "Albums", size: 30, pointSize: 11, caption: "Albums")]
+    let destinations = NSStackView()
     let backButton = SymbolButton("chevron.left", "Back", size: 28)
     private let pageTitle = NSTextField(labelWithString: "")
-    let pagePlay = SymbolButton("play.fill", "Play this collection", size: 28)
-    let refreshButton = SymbolButton("arrow.clockwise", "Refresh", size: 28)
+    let pagePlay = SymbolButton("play.fill", "Play in order", size: 28)
+    let pageShuffle = SymbolButton("shuffle", "Shuffle this collection", size: 28)
+    let refreshButton = SymbolButton("arrow.clockwise", "Refresh", size: 26)
     private let pageSpinner = NSProgressIndicator()
     let table = MusicTable()
     let scroll = NSScrollView()
@@ -81,7 +89,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
     private let timeRow = NSStackView()
     private let utilityRow = NSStackView()
     private let tabs = NSStackView()
-    private let navigationContent = NSView()
+    private let refreshSlot = NSView()
     private let context = NSStackView()
     private let browser = NSView()
     private let accountPane = ControlCard()
@@ -140,8 +148,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
     }
 
     override func loadView() {
-        let surface = NSVisualEffectView(frame: NSRect(origin: .zero, size: preferredContentSize))
-        surface.material = .popover; surface.blendingMode = .withinWindow; surface.state = .active
+        let surface = ThemeBackdrop(frame: NSRect(origin: .zero, size: preferredContentSize))
         view = surface
         content.orientation = .vertical; content.alignment = .leading; content.spacing = 8
         content.detachesHiddenViews = true; content.translatesAutoresizingMaskIntoConstraints = false
@@ -156,11 +163,12 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         player.edgeInsets = NSEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
         titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
         artistLabel.font = .systemFont(ofSize: 12); artistLabel.textColor = .secondaryLabelColor
-        let metadata = NSStackView(views: [titleLabel, artistLabel])
-        metadata.orientation = .vertical; metadata.alignment = .leading; metadata.spacing = 3
+        sourceLabel.font = .systemFont(ofSize: 10, weight: .medium)
+        let metadata = NSStackView(views: [sourceLabel, titleLabel, artistLabel])
+        metadata.orientation = .vertical; metadata.alignment = .leading; metadata.spacing = 2
         metadata.setContentHuggingPriority(.defaultLow, for: .horizontal)
         metadata.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        for label in [titleLabel, artistLabel] {
+        for label in [sourceLabel, titleLabel, artistLabel] {
             label.lineBreakMode = .byTruncatingTail
             label.widthAnchor.constraint(equalTo: metadata.widthAnchor).isActive = true
             label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -169,10 +177,11 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         horizontal(transport, [previousButton, playButton, nextButton], spacing: 4)
         horizontal(heading, [metadata, transport], spacing: 12)
         metadata.widthAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true
-        fixed(heading, 40)
+        fixed(heading, 48)
         button(playButton, #selector(toggle(_:))); button(previousButton, #selector(previous(_:)))
         button(nextButton, #selector(next(_:))); button(shuffleButton, #selector(shuffle(_:)))
         button(addButton, #selector(addSong(_:))); button(muteButton, #selector(mute(_:)))
+        shuffleButton.widthAnchor.constraint(equalToConstant: 98).isActive = true
         shuffleButton.setAccessibilityRole(.checkBox)
         seek.target = self; seek.action = #selector(seekChanged(_:)); seek.setAccessibilityLabel("Playback position")
         seek.beganEditing = { [weak self] in self?.seekSongID = self?.state.track?.id }
@@ -205,34 +214,29 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
             player.addArrangedSubview(child)
             child.widthAnchor.constraint(equalTo: player.widthAnchor, constant: -20).isActive = true
         }
-        add(player); playerHeight = player.heightAnchor.constraint(equalToConstant: 118); playerHeight.isActive = true
+        add(player); playerHeight = player.heightAnchor.constraint(equalToConstant: 126); playerHeight.isActive = true
         footerSeparator.boxType = .separator; fixed(footerSeparator, 1)
+        button(searchButton, #selector(toggleSearch(_:)))
+        for (index, item) in libraryButtons.enumerated() {
+            item.tag = index; button(item, #selector(toggleLibrary(_:)))
+        }
+        horizontal(destinations, [searchButton] + libraryButtons, spacing: 4)
+        destinations.distribution = .fillEqually
+        fixed(destinations, 30); add(destinations)
         search.placeholderString = "Search music"
         search.font = .systemFont(ofSize: 12); search.focusRingType = .none
+        search.isAutomaticTextCompletionEnabled = false
         search.delegate = self; search.target = self; search.action = #selector(searchNow(_:))
         search.sendsWholeSearchString = true; search.setAccessibilityLabel("Search YouTube Music")
         fixed(search, 28); add(search)
-        sections.selectedSegment = 0; sections.segmentDistribution = .fillEqually; sections.controlSize = .regular
-        sections.font = .systemFont(ofSize: 12, weight: .medium)
-        sections.target = self; sections.action = #selector(changeSection(_:))
-        sections.setContentHuggingPriority(.defaultLow, for: .horizontal)
         button(refreshButton, #selector(refreshPage(_:))); spinner(pageSpinner)
         button(backButton, #selector(back(_:))); button(pagePlay, #selector(playPage(_:)))
+        button(pageShuffle, #selector(shufflePage(_:)))
         pageTitle.font = .systemFont(ofSize: 12, weight: .semibold)
         pageTitle.lineBreakMode = .byTruncatingTail
         pageTitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         horizontal(context, [backButton, pageTitle, gap()], spacing: 4)
-        // Library sections and collection navigation occupy the same row.
-        // The refresh indicator replaces its button without shifting content.
-        for child in [sections, context] {
-            child.translatesAutoresizingMaskIntoConstraints = false; navigationContent.addSubview(child)
-            NSLayoutConstraint.activate([
-                child.leadingAnchor.constraint(equalTo: navigationContent.leadingAnchor),
-                child.trailingAnchor.constraint(equalTo: navigationContent.trailingAnchor),
-                child.centerYAnchor.constraint(equalTo: navigationContent.centerYAnchor)
-            ])
-        }
-        let refreshSlot = NSView()
+        context.setContentHuggingPriority(.defaultLow, for: .horizontal)
         for child in [refreshButton, pageSpinner] {
             child.translatesAutoresizingMaskIntoConstraints = false; refreshSlot.addSubview(child)
             NSLayoutConstraint.activate([
@@ -240,12 +244,10 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
                 child.centerYAnchor.constraint(equalTo: refreshSlot.centerYAnchor)
             ])
         }
-        refreshSlot.widthAnchor.constraint(equalToConstant: 28).isActive = true
-        refreshSlot.heightAnchor.constraint(equalToConstant: 28).isActive = true
-        horizontal(tabs, [navigationContent, pagePlay, refreshSlot], spacing: 4)
+        refreshSlot.widthAnchor.constraint(equalToConstant: 26).isActive = true
+        refreshSlot.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        horizontal(tabs, [context, pagePlay, pageShuffle], spacing: 4)
         tabs.detachesHiddenViews = true
-        navigationContent.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        navigationContent.heightAnchor.constraint(equalToConstant: 30).isActive = true
         fixed(tabs, 30); add(tabs)
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("music"))
         table.addTableColumn(column); table.headerView = nil; table.rowHeight = 44
@@ -285,7 +287,8 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         button(accountButton, #selector(showAccount(_:)))
         button(overflowButton, #selector(showMore(_:)))
         appLabel.font = .systemFont(ofSize: 11, weight: .medium); appLabel.textColor = .secondaryLabelColor
-        horizontal(footer, [appLabel, gap(), accountButton, overflowButton], spacing: 5)
+        horizontal(footer, [appLabel, gap(), refreshSlot, accountButton, overflowButton], spacing: 5)
+        footer.detachesHiddenViews = true
         fixed(footer, 26); add(footer)
         browserDirty = true
         render()
@@ -302,7 +305,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         accountStatus.preferredMaxLayoutWidth = 248
         fixed(accountStatus, 28)
         let heading = NSStackView(); spinner(accountSpinner)
-        accountIcon.contentTintColor = .controlAccentColor
+        accountIcon.contentTintColor = NativeTheme.accent
         accountIcon.translatesAutoresizingMaskIntoConstraints = false
         accountIcon.widthAnchor.constraint(equalToConstant: 32).isActive = true
         accountIcon.heightAnchor.constraint(equalToConstant: 32).isActive = true
@@ -330,7 +333,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         accountPane.addArrangedSubview(profileLabel)
         profileLabel.widthAnchor.constraint(equalTo: accountPane.widthAnchor, constant: -24).isActive = true
         button(reconnectButton, #selector(reconnect(_:))); button(browserButton, #selector(openSignIn(_:)))
-        reconnectButton.bezelColor = .controlAccentColor
+        reconnectButton.bezelColor = NativeTheme.accent
         let actions = NSStackView(); horizontal(actions, [browserButton, reconnectButton], spacing: 10)
         accountPane.addArrangedSubview(actions)
         button(accessButton, #selector(openDiskAccess(_:))); accessButton.isBordered = false
@@ -361,11 +364,11 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         }
         browserDirty = true
         render()
-        resumeBrowsing()
+        if browserExpanded { resumeBrowsing() }
         onMainRunLoop { [weak self] in
             guard let self, self.visible, let window = self.view.window,
                   !(window.firstResponder is NSTextView) else { return }
-            window.makeFirstResponder(self.state.signed_in && !self.showingAccount ? self.table : self.reconnectButton)
+            window.makeFirstResponder(!self.state.signed_in || self.showingAccount ? self.reconnectButton : (self.browserExpanded ? self.table : self.playButton))
         }
     }
     func closed() {
@@ -374,6 +377,19 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         searchWork?.cancel(); searchWork = nil
         if let keyboardMonitor { NSEvent.removeMonitor(keyboardMonitor); self.keyboardMonitor = nil }
         for indicator in [playbackSpinner, pageSpinner, accountSpinner] { indicator.stopAnimation(nil) }
+        collapseBrowser()
+    }
+    /// Keep cached pages and the playback source, not an expanded view/editor.
+    /// No network work is issued on collapse or the next ordinary open.
+    func collapseBrowser() {
+        guard isViewLoaded else { return }
+        location.scroll = scroll.contentView.bounds.origin
+        searchWork?.cancel(); searchWork = nil
+        if location.song != nil { location = history.popLast() ?? .library(libraryIndex) }
+        browserExpanded = false; searchExpanded = false; showingAccount = false; detailsVisible = false
+        view.window?.makeFirstResponder(playButton)
+        browserDirty = true
+        render()
     }
     func apply(_ next: State) {
         let connected = !state.signed_in && next.signed_in
@@ -383,7 +399,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
             state.error != next.error || state.notice != next.notice || state.adding != next.adding
         let trackChanged = state.track?.id != next.track?.id
         let transportChanged = trackChanged || state.playing != next.playing || state.loading != next.loading
-        let rowAvailabilityChanged = state.adding != next.adding || state.account_checking != next.account_checking || state.signed_in != next.signed_in
+        let rowAvailabilityChanged = state.adding != next.adding || state.account_checking != next.account_checking || state.signed_in != next.signed_in || state.shuffle != next.shuffle
         let hasAudioChanged = (state.track != nil || state.loading) != (next.track != nil || next.loading)
         if trackChanged || (state.loading && !next.loading) || next.error != nil { pendingSong = nil }
         if boundary {
@@ -419,14 +435,6 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
             render()
             if transportChanged || rowAvailabilityChanged { updateVisibleRows() }
         }
-        if connected {
-            // Warm only the small playlist index, including its disk snapshot.
-            // No stream resolver or audio process is started by this request.
-            onMainRunLoop { [weak self] in
-                guard let self, self.state.signed_in else { return }
-                self.send(["op": "browse", "target": browseTarget(playlistID), "force": false])
-            }
-        }
     }
     private func busy(_ indicator: NSProgressIndicator, _ active: Bool) {
         indicator.isHidden = !active
@@ -435,23 +443,26 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
     private func render() {
         let song = state.loading ? (pendingSong ?? state.track) : state.track
         setText(titleLabel, song?.title ?? (state.loading ? "Starting playback…" : "YTfast"))
-        setText(artistLabel, song?.artist ?? "Choose a song")
+        setText(artistLabel, song?.artist ?? "Choose music below")
+        setText(sourceLabel, state.source ?? "YouTube Music")
+        sourceLabel.toolTip = state.source
         titleLabel.toolTip = song?.title; artistLabel.toolTip = song?.artist
         playButton.setSymbol(state.loading ? "stop.fill" : (state.playing ? "pause.fill" : "play.fill"), state.loading ? "Cancel loading" : (state.playing ? "Pause" : "Play"))
         playButton.isEnabled = state.track != nil || state.loading
         previousButton.isEnabled = state.track != nil && !state.account_checking
         nextButton.isEnabled = state.track != nil && !state.account_checking
         shuffleButton.isOn = state.shuffle; shuffleButton.setAccessibilityValue(state.shuffle ? 1 : 0)
-        shuffleButton.isEnabled = state.track != nil && !state.account_checking
-        shuffleButton.setSymbol("shuffle", state.shuffle ? "Shuffle on" : "Shuffle off")
+        shuffleButton.isEnabled = state.signed_in && !state.account_checking
+        let orderLabel = state.shuffle ? "Shuffle on" : "Shuffle off"
+        if shuffleButton.title != orderLabel { shuffleButton.title = orderLabel }
+        shuffleButton.setSymbol("shuffle", state.shuffle ? "Shuffle on · Turn off" : "Shuffle off · Turn on")
         addButton.isEnabled = state.signed_in && state.track != nil && !state.loading && !state.adding
         addButton.setSymbol("plus", state.adding ? "Adding…" : "Add to playlist")
         seek.isEnabled = state.track != nil && state.duration > 0 && !state.loading
         if !seek.editing { seek.maxValue = max(1, state.duration); seek.doubleValue = state.position }
         if !volume.editing { volume.doubleValue = state.volume }
         if !seek.editing { renderTimes(state.position) }
-        setText(playbackStatus, state.loading ? "Loading…" : (state.format?.components(separatedBy: " (").first ?? ""))
-        playbackStatus.toolTip = state.format
+        setText(playbackStatus, state.loading ? "Loading…" : "")
         busy(playbackSpinner, state.loading)
         renderVolume(volume.doubleValue)
         if browserDirty || renderedLocation != location.identity { renderBrowser() }
@@ -467,18 +478,28 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         browserDirty = false
         let account = showingAccount || !state.signed_in
         let hasAudio = state.track != nil || state.loading
-        player.isHidden = !hasAudio
-        search.isHidden = account || location.song != nil; tabs.isHidden = account
-        search.isEnabled = state.signed_in; sections.isEnabled = state.signed_in
+        player.isHidden = !hasAudio && !state.signed_in
+        let browsing = !account && browserExpanded
+        search.isHidden = !browsing || !searchExpanded || location.song != nil
+        destinations.isHidden = !state.signed_in
+        search.isEnabled = state.signed_in
+        searchButton.isOn = browsing && searchExpanded
+        for (index, item) in libraryButtons.enumerated() {
+            item.isEnabled = state.signed_in
+            item.isOn = browsing && !searchExpanded && libraryIndex == index
+        }
         let page = pages[location.key]
         let nested = location.libraryIndex == nil || location.song != nil || !history.isEmpty
-        context.isHidden = !nested; sections.isHidden = nested
+        tabs.isHidden = !browsing || !nested
         backButton.isHidden = false
-        scroll.isHidden = account; accountPane.isHidden = !account
+        browser.isHidden = !account && !browsing
+        scroll.isHidden = !browsing; accountPane.isHidden = !account
         accountButton.isHidden = !state.signed_in
         accountButton.isOn = showingAccount
-        accountButton.setSymbol(showingAccount ? "music.note.list" : "person.crop.circle", showingAccount ? "Back to library" : "Account · \(state.account)")
-        let newRows = state.signed_in ? (page?.rows ?? []).filter { location.song == nil || $0.editable != nil } : []
+        accountButton.setSymbol(showingAccount ? "xmark" : "person.crop.circle", showingAccount ? "Close account" : "Account · \(state.account)")
+        refreshSlot.isHidden = !browsing || (searchExpanded && location.query.isEmpty)
+        let available = browsing && (!searchExpanded || !location.query.isEmpty) ? (page?.rows ?? []) : []
+        let newRows = location.song == nil ? available : available.filter { $0.editable != nil }
         let moved = renderedLocation != location.identity
         if moved || newRows != rows {
             let selected = table.selectedRow >= 0 && table.selectedRow < rows.count ? rows[table.selectedRow].identity : nil
@@ -491,33 +512,35 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
             scroll.contentView.scroll(to: origin); scroll.reflectScrolledClipView(scroll.contentView)
             renderedLocation = location.identity
         }
-        let loading = searchPending || page == nil || page?.loading == true
-        busy(pageSpinner, !account && loading)
+        let loading = !(searchExpanded && location.query.isEmpty) && (searchPending || page == nil || page?.loading == true)
+        busy(pageSpinner, browsing && loading)
         refreshButton.isEnabled = !loading; refreshButton.isHidden = loading
-        pagePlay.isHidden = account || location.song != nil || page?.play == nil
+        pagePlay.isHidden = !browsing || location.song != nil || page?.play == nil
+        pageShuffle.isHidden = !browsing || location.song != nil || (page?.shuffle == nil && page?.play == nil)
+        pageShuffle.isEnabled = state.signed_in && !state.account_checking
         pagePlay.isEnabled = state.signed_in && !state.account_checking
-        pagePlay.setSymbol("play.fill", "Play \(page?.title ?? location.title)")
+        pagePlay.setSymbol("play.fill", "Play \(page?.title ?? location.title) in order")
+        pageShuffle.setSymbol("shuffle", "Shuffle \(page?.title ?? location.title)")
         setText(pageTitle, location.song.map { "Add “\($0.title)”" } ?? (page?.title.isEmpty == false ? page!.title : location.title))
         pageTitle.toolTip = pageTitle.stringValue
-        sections.selectedSegment = nested ? -1 : libraryIndex
-        moreButton.isHidden = account || page?.more != true
+        moreButton.isHidden = !browsing || page?.more != true || (searchExpanded && location.query.isEmpty)
         moreButton.isEnabled = !loading; moreButton.title = loading ? "Loading…" : "Load more"
-        emptyLabel.isHidden = account || !rows.isEmpty
+        emptyLabel.isHidden = !browsing || !rows.isEmpty
         emptyIcon.isHidden = emptyLabel.isHidden
         emptyIcon.image = NSImage(systemSymbolName: loading ? "ellipsis" : (page?.message != nil ? "wifi.exclamationmark" : (location.query.isEmpty ? "music.note.list" : "magnifyingglass")), accessibilityDescription: nil)
-        setText(emptyLabel, loading ? (location.query.isEmpty ? "Loading…" : "Searching…") : (page?.message != nil ? "Couldn't load music" : (location.song != nil ? "No editable playlists" : (location.query.isEmpty ? "No music here yet" : "No results"))))
-        let message = state.error ?? state.notice ?? (account ? nil : page?.message)
+        setText(emptyLabel, searchExpanded && location.query.isEmpty ? "Search YouTube Music" : (loading ? (location.query.isEmpty ? "Loading…" : "Searching…") : (page?.message != nil ? "Couldn't load music" : (location.song != nil ? "No editable playlists" : (location.query.isEmpty ? "No music here yet" : "No results")))))
+        let message = state.error ?? state.notice ?? (browsing ? page?.message : nil)
         messageRow.isHidden = message == nil
         setText(messageLabel, message ?? ""); messageLabel.toolTip = message
-        retryButton.isHidden = account || page?.message == nil
+        retryButton.isHidden = !browsing || page?.message == nil
         dismissButton.isHidden = state.error == nil && state.notice == nil
         if account { renderAccount() } else { busy(accountSpinner, false) }
         // A search keeps its viewport through debounce, loading and empty
         // results. Stale rows are still removed; typing never moves the footer
         // or the result targets up and down with each network response.
         let rowHeight = rows.isEmpty ? 104 : CGFloat(min(6, rows.count)) * 44
-        browserHeight.constant = account ? (detailsVisible ? 258 : 196) : (location.query.isEmpty ? rowHeight : searchViewportHeight)
-        let heights: [(NSView, CGFloat)] = [(player, playerHeight.constant), (search, 28), (tabs, 30), (browser, browserHeight.constant), (moreButton, 26), (messageRow, 34), (footerSeparator, 1), (footer, 26)]
+        browserHeight.constant = account ? (detailsVisible ? 258 : 196) : (searchExpanded ? searchViewportHeight : rowHeight)
+        let heights: [(NSView, CGFloat)] = [(player, playerHeight.constant), (destinations, 30), (search, 28), (tabs, 30), (browser, browserHeight.constant), (moreButton, 26), (messageRow, 34), (footerSeparator, 1), (footer, 26)]
         let shown = heights.filter { !$0.0.isHidden }
         let size = NSSize(width: Self.width, height: shown.reduce(24) { $0 + $1.1 } + CGFloat(max(0, shown.count - 1)) * 8)
         if preferredContentSize != size { preferredContentSize = size; sizeChanged?(size) }
@@ -551,7 +574,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         accountTitle.toolTip = heading
         accountIcon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 26, weight: .regular))
-        accountIcon.contentTintColor = state.signed_in ? .systemGreen : .controlAccentColor
+        accountIcon.contentTintColor = NativeTheme.accent
         busy(accountSpinner, state.account_checking)
         let choices = (missing ? [Profile(id: state.profile!, label: "Selected profile unavailable")] : []) + state.profiles
         if profilePicker.itemArray.compactMap({ $0.representedObject as? String }) != choices.map(\.id) ||
@@ -588,13 +611,13 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
     private func configure(_ cell: MusicCell, _ index: Int) {
         let row = rows[index]
         cell.configure(row, adding: location.song != nil, current: row.video != nil && row.video == state.track?.id,
-            playing: state.playing, loading: state.loading, enabled: state.signed_in && !state.account_checking && !state.adding)
+            playing: state.playing, loading: state.loading, enabled: state.signed_in && !state.account_checking && !state.adding, shuffled: state.shuffle)
         let generation = accountGeneration
         cell.playAction = { [weak self] in self?.performRowAction(row, operation: "play", generation: generation) }
         cell.addAction = { [weak self] in self?.performRowAction(row, operation: "add", generation: generation) }
     }
     private func loadCurrent(force: Bool = false) {
-        guard visible, state.signed_in, !showingAccount else { return }
+        guard visible, browserExpanded, state.signed_in, !showingAccount, !searchExpanded || !location.query.isEmpty else { return }
         send(["op": "browse", "target": location.target, "force": force])
     }
     private func resumeBrowsing() {
@@ -609,7 +632,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         if location.query.isEmpty, !next.query.isEmpty {
             searchViewportHeight = max(176, min(264, browserHeight?.constant ?? 176))
         }
-        showingAccount = false; location = next; browserDirty = true
+        showingAccount = false; browserExpanded = true; searchExpanded = !next.query.isEmpty; location = next; browserDirty = true
         // Synchronize only on navigation. Backend updates must never replace
         // the field editor's raw draft, selection or marked text.
         if search.stringValue != next.searchText { search.stringValue = next.searchText }
@@ -617,10 +640,17 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         if visible { render() }
         if load { loadCurrent() }
     }
-    @objc func changeSection(_ sender: NSSegmentedControl) {
-        guard sender.selectedSegment >= 0 else { return }
-        libraryIndex = sender.selectedSegment; history.removeAll()
-        navigate(.library(libraryIndex), remember: false)
+    func selectLibrary(_ index: Int) {
+        libraryIndex = index; history.removeAll()
+        navigate(.library(index), remember: false)
+    }
+    @objc func toggleLibrary(_ sender: NSButton) {
+        if browserExpanded && !showingAccount && !searchExpanded && libraryIndex == sender.tag { collapseBrowser() }
+        else { selectLibrary(sender.tag) }
+    }
+    @objc func toggleSearch(_ sender: Any?) {
+        if browserExpanded && !showingAccount && searchExpanded { collapseBrowser() }
+        else { focusSearch() }
     }
     @objc func back(_ sender: Any?) {
         if showingAccount { showingAccount = false; browserDirty = true; render(); resumeBrowsing(); return }
@@ -631,11 +661,21 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         navigate(previous, remember: false)
     }
     func escape() {
-        if showingAccount || !history.isEmpty { back(nil) } else { closeRequested?() }
+        if showingAccount || !history.isEmpty { back(nil) } else if browserExpanded { collapseBrowser() } else { closeRequested?() }
     }
     @objc func refreshPage(_ sender: Any?) { loadCurrent(force: true) }
     @objc func loadMore(_ sender: Any?) { send(["op": "more", "key": location.key]) }
-    @objc func playPage(_ sender: Any?) { if let target = pages[location.key]?.play { send(["op": "play", "target": target]) } }
+    @objc func playPage(_ sender: Any?) {
+        if let page = pages[location.key], let target = page.play { startPlayback(target, source: page.title.isEmpty ? location.title : page.title, shuffle: false) }
+    }
+    @objc func shufflePage(_ sender: Any?) {
+        if let page = pages[location.key], let target = page.shuffle ?? page.play { startPlayback(target, source: page.title.isEmpty ? location.title : page.title, shuffle: true) }
+    }
+    private func startPlayback(_ target: String, source: String, shuffle: Bool? = nil) {
+        var request: [String: Any] = ["op": "play", "target": target, "source": source]
+        if let shuffle { request["shuffle"] = shuffle }
+        send(request)
+    }
     @objc func toggle(_ sender: Any?) { send(["op": "transport", "action": "toggle"]) }
     @objc func previous(_ sender: Any?) { send(["op": "transport", "action": "previous"]) }
     @objc func next(_ sender: Any?) { send(["op": "transport", "action": "next"]) }
@@ -690,13 +730,22 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         if row.video != nil && row.video == state.track?.id { toggle(nil) }
         else {
             if let id = row.video { pendingSong = Song(id: id, title: row.title, artist: row.subtitle) }
-            send(["op": "play", "target": target])
+            startPlayback(state.shuffle ? shuffledTarget(row, fallback: target) : target, source: row.browse != nil ? row.title : (pages[location.key]?.title.isEmpty == false ? pages[location.key]!.title : location.title))
         }
+    }
+    private func shuffledTarget(_ row: Row, fallback: String) -> String {
+        guard let browse = row.browse else { return fallback }
+        if let destination = Location.from(browse, title: row.title), let target = pages[destination.key]?.shuffle { return target }
+        guard let object = try? JSONSerialization.jsonObject(with: Data(fallback.utf8)) as? [String: Any],
+              var watch = object["Watch"] as? [String: Any], let id = watch["playlist_id"] as? String, !id.isEmpty else { return fallback }
+        watch["video_id"] = NSNull()
+        return encodeTarget("Watch", watch)
     }
     private func performRowAction(_ row: Row, operation: String, generation: Int) {
         guard generation == accountGeneration, state.signed_in, !state.account_checking, !state.adding else { return }
         switch operation {
         case "play": if let target = row.play { play(row, target: target) }
+        case "shuffle": if let target = row.play { startPlayback(shuffledTarget(row, fallback: target), source: row.title, shuffle: true) }
         case "add": if let id = row.video { beginAdding(Song(id: id, title: row.title, artist: row.subtitle)) }
         case "open": if let target = row.browse, let destination = Location.from(target, title: row.title) { navigate(destination) }
         default: break
@@ -708,7 +757,10 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         menu.autoenablesItems = false
         var choices: [(String, String)] = []
         if row.play != nil { choices.append((row.video != nil && row.video == state.track?.id ? (state.loading ? "Cancel loading" : (state.playing ? "Pause" : "Play")) : "Play", "play")) }
-        if row.browse != nil { choices.append(("Open", "open")) }
+        if row.browse != nil {
+            if row.play != nil { choices.append(("Shuffle", "shuffle")) }
+            choices.append(("Open", "open"))
+        }
         if row.video != nil { choices.append(("Add to playlist…", "add")) }
         for (title, operation) in choices {
             let item = NSMenuItem(title: title, action: #selector(rowMenuAction(_:)), keyEquivalent: "")
@@ -731,6 +783,11 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         cell.identifier = identifier; configure(cell, index); return cell
     }
 
+    func controlTextDidBeginEditing(_ notification: Notification) {
+        guard notification.object as AnyObject? === search, let editor = search.currentEditor() as? NSTextView else { return }
+        editor.insertionPointColor = NativeTheme.text
+        editor.selectedTextAttributes = [.foregroundColor: NativeTheme.text, .backgroundColor: NativeTheme.accent.withAlphaComponent(0.35)]
+    }
     func controlTextDidChange(_ notification: Notification) {
         guard notification.object as AnyObject? === search else { return }
         enterSearch(immediate: false)
@@ -740,11 +797,14 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         // Let the input method finish composing. A pending prior query is
         // resumed only after committed text arrives or browsing is resumed.
         if let editor = search.currentEditor() as? NSTextView, editor.hasMarkedText() { return }
+        browserExpanded = true; searchExpanded = true
         let draft = search.stringValue
         let query = String(draft.trimmingCharacters(in: .whitespacesAndNewlines).prefix(300))
         guard !query.isEmpty else {
             searchPending = false
             if !location.query.isEmpty { back(nil) }
+            browserExpanded = true; searchExpanded = true; browserDirty = true
+            if visible { render() }
             return
         }
         guard state.signed_in else { return }
@@ -797,6 +857,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         // Search is global. Leave any captured Add chooser without performing
         // a playlist write, then restore the preceding browsing destination.
         while location.song != nil { navigate(history.popLast() ?? .library(libraryIndex), remember: false, load: false) }
+        browserExpanded = true; searchExpanded = true
         if needsResume { resumeBrowsing() }
         if visible { render(); view.window?.makeFirstResponder(search); search.selectText(nil) }
     }
@@ -816,7 +877,9 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         let normalization = NSMenuItem(title: "Volume normalization", action: #selector(toggleNormalization(_:)), keyEquivalent: "")
         normalization.target = self; normalization.state = state.normalize ? .on : .off
         normalization.toolTip = "Lower unusually loud tracks without adding gain."
-        menu.addItem(normalization); menu.addItem(.separator())
+        menu.addItem(normalization)
+        let format = NSMenuItem(title: state.format ?? "Audio format unavailable", action: nil, keyEquivalent: "")
+        format.isEnabled = false; menu.addItem(format); menu.addItem(.separator())
         for (title, action, key) in [("Open YouTube Music", #selector(openSignIn(_:)), ""), ("Full Disk Access…", #selector(openDiskAccess(_:)), ""), ("Quit YTfast", #selector(quit(_:)), "q")] {
             if !key.isEmpty { menu.addItem(.separator()) }
             let item = NSMenuItem(title: title, action: action, keyEquivalent: key); item.target = self; menu.addItem(item)

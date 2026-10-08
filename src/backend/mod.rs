@@ -70,6 +70,12 @@ pub enum Command {
     },
     /// Play a song radio, playlist, album or mix through watch-next.
     PlayTarget(Target),
+    /// A native collection action carries its ordering and origin atomically.
+    PlayFrom {
+        target: Target,
+        source: Option<String>,
+        shuffle: Option<bool>,
+    },
     TogglePause,
     Next,
     Previous,
@@ -630,12 +636,33 @@ impl Worker {
                     return;
                 }
                 self.new_epoch();
+                self.state.source = None;
                 self.set_queue(tracks, start);
                 if let Some(pos) = self.pos {
                     self.start(pos).await;
                 }
             }
-            Command::PlayTarget(target) => self.play_target(target).await,
+            Command::PlayTarget(target) => {
+                if !self.fresh_playback_allowed() {
+                    return;
+                }
+                self.state.source = None;
+                self.play_target(target).await;
+            }
+            Command::PlayFrom {
+                target,
+                source,
+                shuffle,
+            } => {
+                if !self.fresh_playback_allowed() {
+                    return;
+                }
+                if let Some(shuffle) = shuffle {
+                    self.state.shuffle = shuffle;
+                }
+                self.state.source = source;
+                self.play_target(target).await;
+            }
             Command::TogglePause => self.toggle_pause().await,
             Command::Next => self.next(false).await,
             Command::Previous => {

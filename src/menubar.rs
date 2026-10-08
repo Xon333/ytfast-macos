@@ -21,7 +21,9 @@ use crate::paths::Paths;
 use crate::single_instance::{self, Message};
 
 const LIBRARY: &str = "FEmusic_liked_playlists";
-const MAX_PAGES: usize = 8;
+// Retain the playlist index plus three recent destinations; snapshots remain
+// on disk. A compact player does not need eight simultaneous catalogues.
+const MAX_PAGES: usize = 4;
 const MAX_ROWS: usize = 1000;
 
 thread_local! {
@@ -82,6 +84,7 @@ struct MenuPage {
     title: String,
     rows: Vec<MenuRow>,
     play: Option<String>,
+    shuffle: Option<String>,
     loading: bool,
     more: bool,
     message: Option<String>,
@@ -113,6 +116,7 @@ struct MenuSnapshot<'a> {
     volume: f64,
     shuffle: bool,
     format: Option<&'a str>,
+    source: Option<&'a str>,
     normalize: bool,
     signed_in: bool,
     account_checking: bool,
@@ -174,9 +178,11 @@ impl PageEntry {
         self.tokens.clear();
         self.page.title.clear();
         self.page.play = None;
+        self.page.shuffle = None;
         if let Some(h) = page.header {
             self.page.title = h.title;
             self.page.play = h.play.and_then(|t| serde_json::to_string(&t).ok());
+            self.page.shuffle = h.shuffle.and_then(|t| serde_json::to_string(&t).ok());
         }
         self.page.message = page.message;
         for (index, shelf) in page.shelves.into_iter().enumerate() {
@@ -269,6 +275,8 @@ enum Request {
     },
     Play {
         target: String,
+        source: Option<String>,
+        shuffle: Option<bool>,
     },
     Transport {
         action: String,
@@ -401,14 +409,24 @@ impl Core {
                     self.catalog_dirty = true;
                 }
             }
-            Request::Play { target } => {
+            Request::Play {
+                target,
+                source,
+                shuffle,
+            } => {
                 let target: Target =
                     serde_json::from_str(&target).context("Invalid playback target")?;
                 if !matches!(target, Target::Watch { .. }) {
                     bail!("Open this playlist and choose Play");
                 }
                 self.error = None;
-                self.backend.send(Command::PlayTarget(target));
+                self.backend.send(Command::PlayFrom {
+                    target,
+                    source: source.map(|name| {
+                        name.chars().filter(|c| !c.is_control()).take(200).collect()
+                    }),
+                    shuffle,
+                });
             }
             Request::Transport { action } => self.transport(&action)?,
             Request::Shuffle => self.backend.send(Command::ToggleShuffle),
@@ -671,6 +689,7 @@ impl Core {
             volume: pb.volume,
             shuffle: pb.shuffle,
             format: pb.format.as_deref(),
+            source: pb.source.as_deref(),
             normalize: pb.normalize,
             signed_in,
             account_checking: matches!(self.account, Account::Checking),

@@ -203,6 +203,7 @@ func memorySample() -> [String: Any] {
 
 if CommandLine.arguments.contains("--self-test") {
     finishSelfTest()
+    compactSelfTest()
     selfTest()
 } else {
     let data = consume(ytfast_start(nativeWake))

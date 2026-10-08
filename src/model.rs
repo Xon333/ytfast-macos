@@ -311,6 +311,8 @@ pub struct Playback {
     pub autoplay: bool,
     /// "Opus 256 kbps (itag 774)".
     pub format: Option<String>,
+    /// Human-readable origin of the current queue, retained across tracks/launches.
+    pub source: Option<String>,
     pub lyrics: Option<String>,
     pub related: Option<String>,
     /// The next track is resolved and queued in the player for a gapless change.

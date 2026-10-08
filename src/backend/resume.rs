@@ -21,6 +21,8 @@ struct Saved {
     position: f64,
     volume: f64,
     shuffle: bool,
+    #[serde(default)]
+    source: Option<String>,
     repeat: Repeat,
     autoplay: bool,
     /// The queue is a radio or a mix (Smooth mixes blend its changes).
@@ -56,6 +58,7 @@ impl super::Worker {
             position,
             volume: self.state.volume,
             shuffle: self.state.shuffle,
+            source: self.state.source.clone(),
             repeat: self.state.repeat,
             autoplay: self.state.autoplay,
             radio: self.decks.radio,
@@ -96,6 +99,7 @@ impl super::Worker {
             && !queue.is_empty()
         {
             self.queue = queue;
+            self.state.source = saved.source;
             self.decks.radio = saved.radio;
             self.decks.autoplay = saved
                 .autoplayed
@@ -141,5 +145,37 @@ impl super::Worker {
         });
         self.resolving = Some(task.abort_handle());
         self.fetch_player(&video_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_source_survives_session_roundtrip_and_legacy_sessions() {
+        let saved = Saved {
+            queue: queue::Queue::default().snapshot(),
+            index: None,
+            position: 0.0,
+            volume: 70.0,
+            shuffle: true,
+            source: Some("Late nights".into()),
+            repeat: Repeat::Off,
+            autoplay: false,
+            radio: false,
+            autoplayed: vec![],
+        };
+        let mut value = serde_json::to_value(&saved).unwrap();
+        let restored: Saved = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(restored.source.as_deref(), Some("Late nights"));
+        assert!(restored.shuffle);
+        value.as_object_mut().unwrap().remove("source");
+        assert!(
+            serde_json::from_value::<Saved>(value)
+                .unwrap()
+                .source
+                .is_none()
+        );
     }
 }
