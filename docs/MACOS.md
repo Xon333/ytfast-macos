@@ -30,13 +30,15 @@ Arrow keys select without playing. Return activates, Space controls playback, Es
 
 The Swift executable links the Rust core statically. The `menubar` dependency graph excludes egui, eframe, winit, wgpu and the desktop image/font stack. There is no WebView, browser player or UI polling/repaint timer; backend events wake the native run loop. Catalogue updates serialize borrowed Rust pages directly into the bridge buffer; Swift copies the bytes directly into `Data`. This removes the former catalogue clone, owned Rust JSON tree and intermediate Swift string.
 
-The app is an `LSUIElement` with one status item and no normal Dock window. The separate macOS global Now Playing item is OS-owned. mpv's own media-key handling is disabled so native controls retain one owner.
+The app is an `LSUIElement` with one status item and no normal Dock window. The separate macOS global Now Playing item is OS-owned. mpv's own media-key and media-control handling is disabled so native controls retain one owner.
 
 `PopoverDismissal` owns closing while AppKit retains popover placement and anchoring. Application-defined behavior prevents transient mouse-down dismissal from racing the status item's mouse-up toggle. Local/global mouse monitors ignore the status anchor and attached controls; outside clicks, other-app activation, Space changes and Escape close the panel. Monitors and workspace observers are removed on close/termination and are absent while hidden. Mouse-only monitoring requires no new keyboard-monitoring permission.
 
 The optional `desktop-ui` target is separate from the Mac package.
 
 ## Playback path
+
+The native launch path reuses mpv's exact built-in [`libmpv` profile](https://github.com/mpv-player/mpv/blob/v0.41.0/etc/builtin.conf), then disables unused built-in console/overlay scripts, external script loading and adjacent-file discovery through mpv's public options. This invokes the already-installed player; it does not link libmpv or copy GPL source into YTfast. It requires **mpv 0.41+**. The profile was tested unchanged before adding those bounded options. The upstream low-latency profile was not adopted: its buffer/cache-pause changes are unnecessary for this memory correction.
 
 On selection of a known song, its stream lookup, authoritative queue request and mpv startup proceed concurrently. A preparation object owns the shared resolver request and player-start task across the queue handoff. The returned queue still selects the actual current song: a mismatched suggested video ID is discarded rather than played under different metadata. Playlist-only targets start mpv while the queue identifies their first song.
 
@@ -104,7 +106,7 @@ For native interaction, [MonitorControl's slider handler](https://github.com/Mon
 
 ## Build and evidence
 
-Build on macOS 13+ with Rust 1.98+, Xcode Command Line Tools and Homebrew `mpv`, `yt-dlp` and `deno`:
+Build on macOS 13+ with Rust 1.98+, Xcode Command Line Tools and Homebrew `mpv` 0.41+, `yt-dlp` and `deno`:
 
 ```sh
 scripts/build-macos.sh

@@ -2,7 +2,7 @@
 
 **YouTube Music in your menu bar. Native, fast and lightweight.** Browse your library and control playback without a WebView, browser player or Dock window.
 
-[**Download current dark build · Apple Silicon**](https://github.com/Xon333/ytfast-macos/actions/runs/37795329364/artifacts/11558552619) · [CI builds](https://github.com/Xon333/ytfast-macos/actions/workflows/ci.yml) · [Verified changes](docs/CURRENT.md)
+[**Download current build · Apple Silicon**](https://github.com/Xon333/ytfast-macos/actions/runs/37808615571/artifacts/11564426394) · [CI builds](https://github.com/Xon333/ytfast-macos/actions/workflows/ci.yml) · [Verified changes](docs/CURRENT.md)
 
 <p align="center">
   <img src="docs/screenshots/menu-bar-current.png" width="245" alt="Earlier native player and playlist layout">
@@ -41,7 +41,7 @@ Safari and Firefox sessions are not supported. Credentials are handled locally; 
 - **Dark native controls:** Catppuccin Mocha colours, lavender accents and compact reusable AppKit components; dark even under a light system appearance.
 - **Source-quality audio:** direct mpv playback, with Premium Opus/AAC selected by yt-dlp when available. No transcoding or artificial enhancement.
 - **Quick starts:** stream lookup and player startup overlap queue loading; valid streams can be reused across launches.
-- **Small footprint:** AppKit + Rust, reusable rows, no WebView and no idle audio helpers.
+- **Small footprint:** AppKit + Rust, reusable rows, no WebView or idle audio helpers; mpv uses its embedding profile without unused console/overlay scripts.
 
 **Shortcuts:** `⌘F` search · `⌘R` refresh · `Space` play/pause · `Return` select · `Esc` back · `⌘Q` quit
 
