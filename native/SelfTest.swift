@@ -46,6 +46,13 @@ func selfTest() {
     panel.sizeChanged = { [weak window] size in window?.setContentSize(size) }
     window.contentView = panel.view; window.appearance = NSAppearance(named: .darkAqua)
     window.makeKeyAndOrderFront(nil); panel.opened(); panel.view.layoutSubtreeIfNeeded()
+    // NSButton.performClick runs AppKit's event loop. Drain the connection's
+    // already-queued playlist warm-up before measuring this particular action.
+    // The barrier stops this one run-loop turn; it does not sleep or poll.
+    var startupSettled = false
+    onMainRunLoop { startupSettled = true; CFRunLoopStop(CFRunLoopGetMain()) }
+    _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(1))
+    verify(startupSettled, "initial native callbacks did not reach the run-loop barrier")
     verify(controller.status.menu == nil && controller.popover.contentViewController === panel)
     let playerLibraryHeight = panel.preferredContentSize.height
     let collectionCell = panel.table.view(atColumn: 0, row: 0, makeIfNecessary: true) as! MusicCell
@@ -53,13 +60,14 @@ func selfTest() {
     let collectionBrowses = api.sent.filter { $0["op"] as? String == "browse" }.count
     collectionCell.playActionButton.performClick(nil)
     verify(api.last("play")?["target"] as? String == playlistStart && panel.location.key == playlistKey, "inline playlist Play must not open the collection first")
-    verify(api.sent.filter { $0["op"] as? String == "browse" }.count == collectionBrowses)
+    let afterPlayBrowses = api.sent.filter { $0["op"] as? String == "browse" }
+    verify(afterPlayBrowses.count == collectionBrowses, "inline Play dispatched unexpected browsing: \(afterPlayBrowses.dropFirst(collectionBrowses))")
     let nestedFixture = Page(key: "browse:VLPLowned:", target: browseTarget("VLPLowned"), title: "Late nights", rows: fixture.rows, play: playlistStart, loading: false, more: false)
     api.state.pages = [fixture, nestedFixture]; controller.refresh()
     panel.navigate(Location.from(nestedFixture.target, title: nestedFixture.title)!)
     let collectionHeight = panel.preferredContentSize.height
     verify(collectionHeight == playerLibraryHeight, "collection navigation must replace the sections row instead of adding another row")
-    verify(panel.sections.isHidden && !panel.pagePlay.isHidden)
+    verify(panel.sections.isHidden && !panel.pagePlay.isHidden, "collection navigation at \(panel.location.key): sectionsHidden=\(panel.sections.isHidden), playHidden=\(panel.pagePlay.isHidden), pageHasPlay=\(panel.pages[panel.location.key]?.play != nil)")
     panel.back(nil); api.state.pages = [fixture]; controller.refresh()
     verify(panel.makeMoreMenu().items.first?.state == .on)
     panel.toggleNormalization(nil)

@@ -124,6 +124,38 @@ impl Drop for SessionFiles {
     }
 }
 
+/// Find external tools for Finder launches without loading shell profiles.
+pub fn tool(name: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(&tool_path())
+        .map(|p| p.join(name))
+        .find(|p| {
+            std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+        .unwrap_or_else(|| name.into())
+}
+
+/// Child-only PATH. AppKit can start threads before Rust is entered.
+pub fn tool_path() -> std::ffi::OsString {
+    let mut paths: Vec<_> = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .filter(|p| p.is_absolute())
+        .collect();
+    for name in [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ] {
+        let path = std::path::PathBuf::from(name);
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    std::env::join_paths(paths).unwrap_or_else(|_| "/usr/bin:/bin".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,36 +200,4 @@ mod tests {
         assert!(directory.join("unrelated.txt").exists());
         std::fs::remove_dir_all(directory).unwrap();
     }
-}
-
-/// Find external tools for Finder launches without loading shell profiles.
-pub fn tool(name: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    std::env::split_paths(&tool_path())
-        .map(|p| p.join(name))
-        .find(|p| {
-            std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        })
-        .unwrap_or_else(|| name.into())
-}
-
-/// Child-only PATH. AppKit can start threads before Rust is entered.
-pub fn tool_path() -> std::ffi::OsString {
-    let mut paths: Vec<_> = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .filter(|p| p.is_absolute())
-        .collect();
-    for name in [
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-        "/usr/bin",
-        "/bin",
-        "/usr/sbin",
-        "/sbin",
-    ] {
-        let path = std::path::PathBuf::from(name);
-        if !paths.contains(&path) {
-            paths.push(path);
-        }
-    }
-    std::env::join_paths(paths).unwrap_or_else(|_| "/usr/bin:/bin".into())
 }
