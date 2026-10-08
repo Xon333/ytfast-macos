@@ -40,6 +40,16 @@ Current preparation covers the current and next track. Library views, account-sc
 
 The optional desktop target stays separate from the Mac package. Keep remaining code buildable; remove obsolete code deliberately rather than adding compatibility layers.
 
+## Reuse-first requirement — all repository work
+
+For every task, first try exact source or an existing implementation unchanged;
+then adapt that exact source to YTfast. Rebuild only when both options have been
+investigated and cannot satisfy the task or user intent. This applies to UI,
+backend, performance, tooling and documentation—not only visual inspiration.
+Keep a concise source/revision/license attribution and the concrete reason for
+any adaptation or rejection. Prefer the existing dependency's built-in feature
+over adding another framework. Licensing, privacy and correctness still apply.
+
 ## Dependencies and licensing
 
 - Keep `Cargo.lock` committed.

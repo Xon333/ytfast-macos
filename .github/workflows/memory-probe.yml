@@ -1,0 +1,32 @@
+name: Bounded memory probe
+on:
+  push:
+    branches: [perf/native-memory-20261008]
+    paths: [.github/workflows/memory-probe.yml, scripts/probe-mpv-memory.py]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: macos-15
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: brew install mpv
+      - name: Compare existing mpv with its upstream embedding profile
+        run: |
+          python3 scripts/probe-mpv-memory.py
+          python3 scripts/probe-mpv-memory.py --endurance
+      - name: Preserve exact public source for bounded implementation analysis
+        if: always()
+        run: |
+          mkdir -p artifacts/memory-probe
+          git archive HEAD -o artifacts/memory-probe/source.tar
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ytfast-memory-probe
+          path: artifacts/memory-probe/
+          if-no-files-found: error
