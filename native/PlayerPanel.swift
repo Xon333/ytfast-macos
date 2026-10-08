@@ -112,6 +112,9 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
     }
     private func horizontal(_ stack: NSStackView, _ children: [NSView], spacing: CGFloat = 8) {
         stack.orientation = .horizontal; stack.alignment = .centerY; stack.spacing = spacing
+        // A row fills its constrained width. AppKit's default gravity-area
+        // distribution otherwise leaves flexible text/navigation at intrinsic width.
+        stack.distribution = .fill
         for child in children { stack.addArrangedSubview(child) }
     }
     private func gap() -> NSView {
@@ -154,6 +157,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         artistLabel.font = .systemFont(ofSize: 12); artistLabel.textColor = .secondaryLabelColor
         let metadata = NSStackView(views: [titleLabel, artistLabel])
         metadata.orientation = .vertical; metadata.alignment = .leading; metadata.spacing = 3
+        metadata.setContentHuggingPriority(.defaultLow, for: .horizontal)
         metadata.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         for label in [titleLabel, artistLabel] {
             label.lineBreakMode = .byTruncatingTail
@@ -295,6 +299,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         accountStatus.font = .systemFont(ofSize: 11); accountStatus.textColor = .secondaryLabelColor
         accountStatus.alignment = .left; accountStatus.maximumNumberOfLines = 2
         accountStatus.preferredMaxLayoutWidth = 248
+        fixed(accountStatus, 28)
         let heading = NSStackView(); spinner(accountSpinner)
         accountIcon.contentTintColor = .controlAccentColor
         accountIcon.translatesAutoresizingMaskIntoConstraints = false
@@ -302,12 +307,15 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         accountIcon.heightAnchor.constraint(equalToConstant: 32).isActive = true
         let copy = NSStackView(views: [accountTitle, accountStatus])
         copy.orientation = .vertical; copy.alignment = .leading; copy.spacing = 4
+        copy.setContentHuggingPriority(.defaultLow, for: .horizontal)
         for label in [accountTitle, accountStatus] {
             label.widthAnchor.constraint(equalTo: copy.widthAnchor).isActive = true
             label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
         horizontal(heading, [accountIcon, copy, accountSpinner], spacing: 10)
-        heading.detachesHiddenViews = true
+        // Preserve the spinner's slot so the caption keeps the same usable
+        // width while connecting and can show both of its lines.
+        heading.detachesHiddenViews = false
         accountPane.addArrangedSubview(heading)
         heading.widthAnchor.constraint(equalTo: accountPane.widthAnchor, constant: -24).isActive = true
         fixed(heading, 50)
@@ -528,7 +536,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         } else if state.account.localizedCaseInsensitiveContains("keychain") {
             heading = "Unlock the browser session"; status = "Reconnect and allow the browser’s Safe Storage prompt."; symbol = "key"
         } else {
-            heading = "Connect YouTube Music"; status = "Sign in in \(browserName), then connect."; symbol = "music.note"
+            heading = "Connect YouTube Music"; status = "Open \(browserName), sign in, then connect."; symbol = "music.note"
         }
         setText(accountTitle, heading); setText(accountStatus, status)
         accountTitle.toolTip = heading

@@ -244,7 +244,7 @@ func selfTest() {
         api.state.format = "Opus 256 kbps · Premium (itag 774)"; controller.refresh()
         capture("player-dark.png", appearance: .darkAqua)
         capture("player-light.png", appearance: .aqua)
-        verify(panel.sections.frame.width >= 280, "root library sections must fill the available row")
+        verify(panel.sections.frame.width >= 280, "root library sections must fill the available row; actual width \(panel.sections.frame.width) pt")
         panel.table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         capture("player-actions-dark.png", appearance: .darkAqua)
         panel.table.deselectAll(nil)

@@ -46,7 +46,7 @@ The native path prepares the current and next track. It does not resolve visible
 
 The resolver uses yt-dlp's best audio selection with language, quality, source, codec and bitrate ordering. It accepts suffixed Premium formats and future audio format IDs, preserves original/default-language preference and avoids DRC variants when a better equivalent exists. Upstream Premium-aware client selection and account discovery remain intact. Only unusable DASH fragment-manifest extraction is skipped; direct HTTPS and HLS audio remain available.
 
-The displayed codec/bitrate comes from the selected source's metadata rather than a fixed bitrate inferred from its itag. Sample rate, non-stereo channel count and format ID are available in the tooltip. Existing valid URL caches remain readable; entries without source metadata display only known codec/Premium information. The resolver scopes cached URLs and metadata to the selected browser session and discards them ten minutes before expiry. A matching session can reuse valid URLs across launches. mpv receives the selected stream directly and prepares the queued transition.
+The displayed codec/bitrate comes from the selected source's metadata rather than a fixed bitrate inferred from its itag. Sample rate, non-stereo channel count and format ID are available in the tooltip. Existing valid URL caches remain readable; entries without source metadata display only known codec/Premium information. The resolver scopes cached URLs and metadata to the selected browser session and only reuses URLs with more than ten minutes remaining. A matching session can reuse valid URLs across launches. mpv receives the selected stream directly and prepares the queued transition.
 
 When enabled, loudness normalization uses YouTube's metadata with attenuation only; it never applies positive gain without peak-headroom evidence. The native More menu now exposes this existing setting. It does not alter the selected codec or bitrate, transcode audio or impose additional compression.
 
@@ -86,7 +86,7 @@ Library snapshots and signed stream URLs use an opaque fingerprint of the profil
 
 Owned private directories use mode 0700; cookie exports and written cache files use 0600. The short runtime path accommodates Unix-domain sockets.
 
-There is no YTfast backend or telemetry. Authenticated traffic goes directly to YouTube/Google. Cookies, Safe Storage secrets, real-account captures and private logs must not enter Git or CI artifacts.
+There is no hosted YTfast server or telemetry. Authenticated traffic goes directly to YouTube/Google. Cookies, Safe Storage secrets, real-account captures and private logs must not enter Git or CI artifacts.
 
 ## Design provenance
 
