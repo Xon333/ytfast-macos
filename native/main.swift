@@ -7,7 +7,7 @@ import CoreFoundation
 // Common-mode delivery keeps commands live during menu and slider tracking.
 func onMainRunLoop(_ action: @escaping () -> Void) {
     let loop = CFRunLoopGetMain()
-    CFRunLoopPerformBlock(loop, CFRunLoopMode.commonModes.rawValue) { autoreleasepool(invoking: action) }
+    CFRunLoopPerformBlock(loop, CFRunLoopMode.commonModes.rawValue, action)
     CFRunLoopWakeUp(loop)
 }
 let wakeLock = NSLock()
