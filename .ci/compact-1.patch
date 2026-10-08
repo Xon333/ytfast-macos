@@ -1,0 +1,271 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 8e9677e..e824a9a 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -60,2 +60,5 @@ jobs:
+           scripts/smoke-macos.sh
++      - if: runner.os == 'macOS' && github.head_ref == 'ui/compact-oxocarbon-20261008'
++        name: Same-runner compact native memory comparison
++        run: scripts/compare-native-memory.sh
+       - if: always() && runner.os == 'macOS'
+diff --git a/native/CompactSelfTest.swift b/native/CompactSelfTest.swift
+new file mode 100644
+index 0000000..45ee208
+--- /dev/null
++++ b/native/CompactSelfTest.swift
+@@ -0,0 +1,60 @@
++import AppKit
++
++/// Bounded checks of the changed product flows, using the same production views.
++func compactSelfTest() {
++    let api = TestAPI()
++    api.state.signed_in = true; api.state.account_checking = false
++    api.state.source = "Late nights"
++    let target = encodeTarget("Watch", ["video_id": NSNull(), "playlist_id": "PLfixture", "params": NSNull()])
++    let serverShuffle = encodeTarget("Watch", ["video_id": "abcdefghijk", "playlist_id": "PLfixture", "params": "server-shuffle"])
++    let location = Location.from(browseTarget("VLPLfixture"), title: "Late nights")!
++    let page = Page(key: location.key, target: location.target, title: "Late nights", rows: [], play: target, shuffle: serverShuffle, loading: false, more: false)
++    api.state.pages = [page]
++    let owner = MenuApp(api: api, testing: true)
++    owner.setup(); owner.refresh(); owner.showPopover()
++    let panel = owner.panel!
++    let height = panel.preferredContentSize.height
++    precondition(!panel.browserExpanded && panel.search.isHidden && panel.rows.isEmpty)
++    precondition(panel.view is ThemeBackdrop && !(panel.view is NSVisualEffectView))
++    precondition(height <= 240, "compact player should not reserve catalogue height")
++    precondition(panel.shuffleButton.isEnabled, "shuffle must be available before choosing a song")
++    precondition(panel.shuffleButton.title == "Shuffle off")
++    panel.shuffleButton.performClick(nil)
++    precondition(api.last("shuffle") != nil)
++    api.state.shuffle = true; owner.refresh()
++    precondition(panel.shuffleButton.title == "Shuffle on" && panel.shuffleButton.isOn)
++    precondition(panel.sourceLabel.stringValue == "Late nights")
++    panel.navigate(location)
++    panel.shufflePage(nil)
++    precondition(api.last("play")?["target"] as? String == serverShuffle, "reuse the server's shuffle target")
++    precondition(api.last("play")?["shuffle"] as? Bool == true && api.last("play")?["source"] as? String == "Late nights")
++    panel.playPage(nil)
++    precondition(api.last("play")?["target"] as? String == target && api.last("play")?["shuffle"] as? Bool == false)
++    panel.collapseBrowser(); owner.popover.performClose(nil)
++    let browseCount = api.sent.filter { $0["op"] as? String == "browse" }.count
++    for _ in 0..<10 {
++        owner.showPopover()
++        precondition(!panel.browserExpanded && panel.search.isHidden && panel.preferredContentSize.height == height)
++        owner.popover.performClose(nil)
++    }
++    precondition(api.sent.filter { $0["op"] as? String == "browse" }.count == browseCount, "ordinary opens must not request a catalogue")
++    owner.showPopover()
++    for button in panel.libraryButtons {
++        button.performClick(nil); precondition(panel.browserExpanded && button.isOn)
++        button.performClick(nil); precondition(!panel.browserExpanded && !button.isOn)
++    }
++    panel.searchButton.performClick(nil); precondition(panel.searchExpanded && !panel.search.isHidden)
++    panel.searchButton.performClick(nil); precondition(!panel.browserExpanded && panel.search.isHidden)
++    api.state.format = "Opus · 256 kbps · Premium"; owner.refresh()
++    precondition(panel.makeMoreMenu().items.contains { $0.title == api.state.format })
++    panel.view.layoutSubtreeIfNeeded()
++    precondition(abs(panel.playButton.frame.width - panel.playButton.frame.height) < 0.01)
++    precondition(abs(panel.playButton.shapeBounds.width - panel.playButton.shapeBounds.height) < 0.01)
++    let original = panel.playButton.bounds
++    panel.playButton.bounds = NSRect(x: 0, y: 0, width: 36, height: 42)
++    precondition(panel.playButton.shapeBounds.width == panel.playButton.shapeBounds.height, "even a stretched host must draw a circle")
++    panel.playButton.bounds = original
++    owner.popover.performClose(nil); owner.dismissal.stop()
++    NSStatusBar.system.removeStatusItem(owner.status)
++    fputs("Compact checks: PASS (collapsed startup/reopen, no eager browse, destinations, ordering, source, More audio, round control)\n", stderr)
++}
+diff --git a/native/Controls.swift b/native/Controls.swift
+index 3b52f7d..5d2abce 100644
+--- a/native/Controls.swift
++++ b/native/Controls.swift
+@@ -12,3 +12,3 @@ final class SymbolButton: MenuActionButton {
+                 baseColor = primary ? NativeTheme.base : (isOn ? NativeTheme.accent : NativeTheme.text)
+-                hoverColor = baseColor
++                hoverColor = primary ? NativeTheme.base : NativeTheme.text
+                 needsDisplay = true
+@@ -18,3 +18,3 @@ final class SymbolButton: MenuActionButton {
+ 
+-    init(_ symbol: String, _ label: String, size: CGFloat = 30, pointSize: CGFloat = 13, primary: Bool = false) {
++    init(_ symbol: String, _ label: String, size: CGFloat = 30, pointSize: CGFloat = 13, primary: Bool = false, caption: String? = nil) {
+         self.primary = primary
+@@ -22,16 +22,21 @@ final class SymbolButton: MenuActionButton {
+         super.init(frame: .zero)
+-        title = ""
++        title = caption ?? ""
++        font = .systemFont(ofSize: 11, weight: .medium)
+         isBordered = false
+         bezelStyle = .regularSquare
+-        imagePosition = .imageOnly
++        imagePosition = caption == nil ? .imageOnly : .imageLeading
+         imageScaling = .scaleNone
+-        focusRingType = .exterior
++        focusRingType = .none
+         setButtonType(.momentaryChange)
+         translatesAutoresizingMaskIntoConstraints = false
+-        NSLayoutConstraint.activate([
+-            widthAnchor.constraint(equalToConstant: size),
+-            heightAnchor.constraint(equalToConstant: size)
+-        ])
++        heightAnchor.constraint(equalToConstant: size).isActive = true
++        if caption == nil {
++            widthAnchor.constraint(equalTo: heightAnchor).isActive = true
++        } else {
++            widthAnchor.constraint(greaterThanOrEqualToConstant: size).isActive = true
++        }
++        setContentHuggingPriority(.required, for: .vertical)
++        setContentCompressionResistancePriority(.required, for: .vertical)
+         baseColor = primary ? NativeTheme.base : NativeTheme.text
+-        hoverColor = baseColor
++        hoverColor = primary ? NativeTheme.base : NativeTheme.text
+         setSymbol(symbol, label)
+@@ -39,2 +44,5 @@ final class SymbolButton: MenuActionButton {
+     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
++    // These controls paint their own bezel; do not inherit NSButton's unequal
++    // optical insets, which can stretch a square Auto Layout alignment rect.
++    override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0) }
+ 
+@@ -48,16 +56,31 @@ final class SymbolButton: MenuActionButton {
+     }
++    /// A circle uses its smaller dimension, not a stretched rounded bezel.
++    /// This also protects drawing if a host scales the native button's frame.
++    var shapeBounds: NSRect {
++        if !primary { return bounds.insetBy(dx: 1, dy: 1) }
++        let side = max(0, min(bounds.width, bounds.height) - 2)
++        return NSRect(x: bounds.midX - side / 2, y: bounds.midY - side / 2, width: side, height: side)
++    }
++    private var shape: NSBezierPath {
++        primary ? NSBezierPath(ovalIn: shapeBounds) : NSBezierPath(roundedRect: shapeBounds, xRadius: 7, yRadius: 7)
++    }
+     override func draw(_ dirtyRect: NSRect) {
+         let pressed = cell?.isHighlighted == true
+-        if primary || isOn || (isEnabled && (isHovered || pressed)) {
+-            let fill = primary || isOn ? NativeTheme.accent : NativeTheme.text
+-            fill.withAlphaComponent(primary ? (isEnabled ? (pressed ? 0.75 : 1) : 0.3) : (pressed ? 0.24 : (isOn ? 0.15 : 0.07))).setFill()
+-            let radius: CGFloat = primary ? bounds.height / 2 : 7
+-            NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: radius, yRadius: radius).fill()
++        if primary {
++            NativeTheme.text.withAlphaComponent(isEnabled ? (pressed ? 0.75 : 1) : 0.3).setFill()
++            shape.fill()
++        } else if isOn || (isEnabled && (isHovered || pressed)) {
++            (isOn ? NativeTheme.accent.withAlphaComponent(0.18) : NativeTheme.hover).setFill()
++            shape.fill()
++            (isOn ? NativeTheme.accent : NativeTheme.secondary).setStroke()
++            shape.lineWidth = 1; shape.stroke()
+         }
+         super.draw(dirtyRect)
++        if window?.firstResponder === self {
++            NativeTheme.text.setStroke(); shape.lineWidth = 2; shape.stroke()
++        }
+     }
+-    override func drawFocusRingMask() {
+-        let radius: CGFloat = primary ? bounds.height / 2 : 7
+-        NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: radius, yRadius: radius).fill()
+-    }
++    override func becomeFirstResponder() -> Bool { let accepted = super.becomeFirstResponder(); needsDisplay = true; return accepted }
++    override func resignFirstResponder() -> Bool { let accepted = super.resignFirstResponder(); needsDisplay = true; return accepted }
++    override func drawFocusRingMask() { shape.fill() }
+     override var focusRingMaskBounds: NSRect { bounds }
+@@ -189,3 +212,3 @@ final class MusicRowView: NSTableRowView {
+         if hovered && !isSelected {
+-            NativeTheme.surface.setFill()
++            NativeTheme.hover.setFill()
+             NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 1), xRadius: 6, yRadius: 6).fill()
+@@ -272,3 +295,3 @@ final class MusicCell: NSTableCellView {
+     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+-    func configure(_ row: Row, adding: Bool, current: Bool, playing: Bool, loading: Bool = false, enabled: Bool = true) {
++    func configure(_ row: Row, adding: Bool, current: Bool, playing: Bool, loading: Bool = false, enabled: Bool = true, shuffled: Bool = false) {
+         var detail = row.subtitle
+@@ -282,2 +305,3 @@ final class MusicCell: NSTableCellView {
+         playActionButton.setSymbol(current && loading ? "stop.fill" : (current && playing ? "pause.fill" : "play.fill"), current && loading ? "Cancel loading" : (current && playing ? "Pause" : "Play \(row.title)"))
++        if isCollection && shuffled { playActionButton.setSymbol("shuffle", "Shuffle \(row.title)") }
+         addActionButton.setSymbol("plus", "Add \(row.title) to playlist")
+diff --git a/native/FinishSelfTest.swift b/native/FinishSelfTest.swift
+index acd38c5..b5dabaf 100644
+--- a/native/FinishSelfTest.swift
++++ b/native/FinishSelfTest.swift
+@@ -63,4 +63,4 @@ func finishSelfTest() {
+     precondition(panel.view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua, "product must stay dark under a light host")
+-    precondition(panel.seek.trackFillColor == NativeTheme.accent && panel.volume.trackFillColor == NativeTheme.accent)
+-    precondition(panel.playButton.baseColor == NativeTheme.base, "primary glyph must contrast with lavender fill")
++    precondition(panel.seek.trackFillColor == NativeTheme.text && panel.volume.trackFillColor == NativeTheme.text)
++    precondition(panel.playButton.baseColor == NativeTheme.base, "primary glyph must contrast with white fill")
+     lightHost.contentView = nil; lightHost.orderOut(nil)
+diff --git a/native/Models.swift b/native/Models.swift
+index 3046327..f182bb6 100644
+--- a/native/Models.swift
++++ b/native/Models.swift
+@@ -12,3 +12,3 @@ struct Page: Codable, Equatable {
+     var key: String; var target: String; var title: String; var rows: [Row]
+-    var play: String?; var loading: Bool; var more: Bool; var message: String?
++    var play: String?; var shuffle: String?; var loading: Bool; var more: Bool; var message: String?
+ }
+@@ -17,3 +17,3 @@ struct State: Codable {
+     var position = 0.0; var duration = 0.0; var volume = 70.0; var shuffle = false; var normalize = true
+-    var format: String?; var signed_in = false; var account_checking = true; var account_unverified = false
++    var format: String?; var source: String?; var signed_in = false; var account_checking = true; var account_unverified = false
+     var account = "Connecting…"; var profiles: [Profile] = []; var profile: String?
+diff --git a/native/NativeTheme.swift b/native/NativeTheme.swift
+index ce5e626..135e4cc 100644
+--- a/native/NativeTheme.swift
++++ b/native/NativeTheme.swift
+@@ -2,31 +2,26 @@ import AppKit
+ 
+-/// Catppuccin Mocha palette, reused verbatim (MIT, Copyright (c) 2021 Catppuccin).
+-/// https://github.com/catppuccin/palette/blob/07d02aa110ef9eb7e7427afca5c73ba9cf7f8ebd/palette.json
+-/// Only these tokens are needed; no theme package, renderer or runtime parsing.
+-/// Full notice: ThirdParty/Catppuccin-LICENSE.txt, also bundled with the app.
++/// Exact non-blue tokens from oxocarbon.nvim, adapted to native AppKit colours.
++/// MIT, Copyright (c) 2022 Riccardo Mazzarini; full notice is bundled.
++/// https://github.com/nyoom-engineering/oxocarbon.nvim/blob/cd6523a0836d6e8ee823d343149fd06c7b71fdde/lua/oxocarbon/init.lua
++/// The Neovim highlight engine cannot host AppKit controls. Reuse its base00,
++/// base06 and base13 directly; black is the user's explicit OLED override.
++/// Existing Mino-derived controls retain their input and hover implementation.
+ enum NativeTheme {
+-    private static func rgb(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat) -> NSColor {
+-        NSColor(srgbRed: r / 255, green: g / 255, blue: b / 255, alpha: 1)
+-    }
+-    static let base = rgb(30, 30, 46)       // #1e1e2e
+-    static let surface = rgb(49, 50, 68)    // #313244
+-    static let border = rgb(69, 71, 90)     // #45475a
+-    static let text = rgb(205, 214, 244)    // #cdd6f4
+-    static let secondary = rgb(166, 173, 200) // #a6adc8
+-    static let accent = rgb(180, 190, 254)  // #b4befe, Lavender
++    static let base = NSColor.black                 // requested OLED override
++    static let surface = NSColor(srgbRed: 22 / 255, green: 22 / 255, blue: 22 / 255, alpha: 1) // base00 #161616
++    static let text = NSColor.white                 // base06 #ffffff
++    static let accent = NSColor(srgbRed: 66 / 255, green: 190 / 255, blue: 101 / 255, alpha: 1) // base13 #42be65
++    static let secondary = text.withAlphaComponent(0.7)
++    static let border = text.withAlphaComponent(0.18)
++    static let hover = text.withAlphaComponent(0.14)
+ 
+     static func install(on panel: PlayerPanel) {
+-        let root = panel.view
+-        root.appearance = NSAppearance(named: .darkAqua)
+-        let backdrop = ThemeBackdrop(frame: root.bounds)
+-        backdrop.autoresizingMask = [.width, .height]
+-        backdrop.setAccessibilityElement(false)
+-        root.addSubview(backdrop, positioned: .below, relativeTo: nil)
++        panel.view.appearance = NSAppearance(named: .darkAqua)
+         panel.titleLabel.textColor = text
+         panel.artistLabel.textColor = secondary
++        panel.sourceLabel.textColor = secondary
+         panel.search.textColor = text
+         panel.search.backgroundColor = surface
+-        panel.sections.selectedSegmentBezelColor = accent.withAlphaComponent(0.22)
+-        panel.seek.trackFillColor = accent
+-        panel.volume.trackFillColor = accent
++        panel.seek.trackFillColor = text
++        panel.volume.trackFillColor = text
+     }
+@@ -34,8 +29,7 @@ enum NativeTheme {
+ 
+-/// One static, layer-free surface behind the existing native controls. It
+-/// cannot receive input or enter the accessibility tree; geometry is unchanged.
+-private final class ThemeBackdrop: NSView {
++/// Reuse the existing opaque backdrop AS the root. An OLED-black panel does
++/// not need a second background or the visual-effect material it used to hide.
++final class ThemeBackdrop: NSView {
+     override var isOpaque: Bool { true }
+     override func draw(_ dirtyRect: NSRect) { NativeTheme.base.setFill(); dirtyRect.fill() }
+-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+ }

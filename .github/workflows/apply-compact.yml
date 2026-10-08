@@ -1,0 +1,31 @@
+name: Apply exact compact candidate
+on:
+  push:
+    branches: [ui/compact-oxocarbon-20261008]
+    paths: [.ci/compact-1.patch, .ci/compact-2.patch, .ci/compact-3.patch, .github/workflows/apply-compact.yml]
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: github.repository == 'Xon333/ytfast-macos' && github.ref == 'refs/heads/ui/compact-oxocarbon-20261008'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+      - name: Apply hash-verified implementation and remove this one-off transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = 5eb7fccca59463f00b15fd983e83b4884eab5298
+          cat .ci/compact-{1,2,3}.patch > "$RUNNER_TEMP/compact.patch"
+          echo "03056498dfc77e832169d3ba875ff8d563e45870f78fabc02ebf1a95e4c48845  $RUNNER_TEMP/compact.patch" | sha256sum --check
+          git apply --check --index "$RUNNER_TEMP/compact.patch"
+          git apply --index "$RUNNER_TEMP/compact.patch"
+          git rm .ci/compact-{1,2,3}.patch .github/workflows/apply-compact.yml
+          git diff --cached --check
+          git -c user.name='YTfast implementation' -c user.email='ytfast@users.noreply.github.com' commit -m 'Adapt existing native controls into compact Oxocarbon player with explicit ordering'
+          git push origin HEAD:refs/heads/ui/compact-oxocarbon-20261008
+          git log -1 --format='%H %T'
