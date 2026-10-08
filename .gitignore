@@ -1,6 +1,8 @@
 /target
 /artifacts
 /dist
+# Ignore generated and downloaded ZIP archives anywhere in the tree.
+*.zip
 # Never commit account material.
 *cookies*.txt
 /notes
