@@ -218,10 +218,12 @@ fn borrowed_snapshot_preserves_native_wire_contract() {
 // The previous production path, kept only as a synthetic benchmark baseline:
 // clone the catalogue, construct its complete owned JSON tree, then encode.
 fn owned_snapshot(snapshot: &MenuSnapshot<'_>) -> String {
-    let pages = snapshot
-        .pages
-        .as_ref()
-        .map(|pages| pages.iter().map(|page| (**page).clone()).collect::<Vec<_>>());
+    let pages = snapshot.pages.as_ref().map(|pages| {
+        pages
+            .iter()
+            .map(|page| (**page).clone())
+            .collect::<Vec<_>>()
+    });
     json!({
         "track": snapshot.track, "playing": snapshot.playing, "loading": snapshot.loading,
         "position": snapshot.position, "duration": snapshot.duration, "volume": snapshot.volume,
