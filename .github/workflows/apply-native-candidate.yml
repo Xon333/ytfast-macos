@@ -1,0 +1,70 @@
+name: Apply exact native candidate
+on:
+  push:
+    branches: [feat/compact-oled-20261008]
+    paths: [.native-apply/**, .github/workflows/apply-native-candidate.yml]
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: github.repository == 'Xon333/ytfast-macos' && github.ref == 'refs/heads/feat/compact-oled-20261008'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Verify and apply the reviewed patch bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import gzip, hashlib
+          expected = ['38bd2a977a869813dfb4b8d48c7c4c71ddacb207', '4259d8d312d0a03c088b5e53441f1be4aa9b6328', 'a501af3c2d39cbc1b84b7fea110b69c6435c331b', 'd04ccb262a7f360a702743527a653d0e2636b62a']
+          parts = []
+          for index, sha in enumerate(expected):
+              data = Path(f'.native-apply/part{index}').read_bytes()
+              assert hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest() == sha
+              parts.append(data)
+          repaired = bytearray(parts[1])
+          assert repaired[1100] == 167
+          repaired[1100] = 103
+          assert hashlib.sha1(f'blob {len(repaired)}\0'.encode() + repaired).hexdigest() == '603a86b0a9dc655155bd6591b99ee7687ed2be70'
+          parts[1] = bytes(repaired)
+          compressed = b''.join(parts)
+          assert hashlib.sha256(compressed).hexdigest() == '0a6d3a3965bb5196ed1933ddfc4af9ee49405bbe06bd31a9c349d5a5c9422f99'
+          patch = gzip.decompress(compressed)
+          assert hashlib.sha256(patch).hexdigest() == '96398bff7d55f5be485528d7684e2e399a5d433bc4e53a87461a5fed68cef39c'
+          Path('/tmp/native-candidate.patch').write_bytes(patch)
+          PY
+          # Retain the newer measured audio correction and repo-wide reuse rule.
+          # README already contains this UI pass's replacement copy.
+          git apply --check --exclude=AGENTS.md --exclude=README.md --exclude=src/mpv.rs --exclude=src/mpv_tests.rs /tmp/native-candidate.patch
+          git apply --exclude=AGENTS.md --exclude=README.md --exclude=src/mpv.rs --exclude=src/mpv_tests.rs /tmp/native-candidate.patch
+      - name: Format using the repository's pinned compiler
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal --component rustfmt
+          cargo +1.98.0 fmt --all
+          git diff --check
+      - name: Publish production changes on the isolated branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git ls-remote origin refs/heads/feat/compact-oled-20261008 | cut -f1)" = "$GITHUB_SHA"
+          git add Cargo.toml Cargo.lock native src docs
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Compact OLED player, explicit shuffle, and bounded native catalogue'
+          git push origin HEAD:refs/heads/feat/compact-oled-20261008
+          mkdir -p artifacts/native-candidate
+          git rev-parse HEAD HEAD^{tree} > artifacts/native-candidate/revision.txt
+          git show --stat --oneline HEAD > artifacts/native-candidate/changes.txt
+          git archive HEAD -o artifacts/native-candidate/source.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-candidate-source
+          path: artifacts/native-candidate/
+          if-no-files-found: error
