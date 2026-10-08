@@ -1,5 +1,13 @@
 use super::*;
 
+/// A cancelled native selection retains its collection label and shuffle intent.
+#[derive(Clone)]
+pub(super) struct Selection {
+    pub target: Target,
+    pub source: Option<String>,
+    pub collection: bool,
+}
+
 pub(super) enum StartError {
     Player(anyhow::Error),
     Stream(anyhow::Error),
@@ -116,7 +124,7 @@ impl super::Worker {
         if let Some(task) = self.queue_request.take() {
             task.abort();
         }
-        self.pending_target = None;
+        self.pending_selection = None;
         self.extending = false;
         self.advance_pending = false;
         self.waiting_for_network = false;
@@ -173,7 +181,11 @@ impl super::Worker {
         self.paused = false;
         self.idle = true;
         self.decks.radio = deck::is_radio(&target);
-        self.pending_target = Some(target.clone());
+        self.pending_selection = Some(Selection {
+            target: target.clone(),
+            source: preparation.source.clone(),
+            collection,
+        });
         self.update_transport();
         let current = self.client.clone();
         let client = Arc::new(current.snapshot());
@@ -202,7 +214,7 @@ impl super::Worker {
             let _ = tx.send(Internal::Queue {
                 epoch,
                 result,
-                preparation,
+                preparation: Box::new(preparation),
             });
             while let Some(t) = token.take().filter(|_| total < 500) {
                 let Ok(value) = client.next_continuation(&t).await else {
@@ -263,7 +275,7 @@ impl super::Worker {
             self.appended = None;
             self.idle = true;
             self.paused = true;
-            if self.pending_target.is_none() {
+            if self.pending_selection.is_none() {
                 self.resume_at = Some(self.state.position);
             }
             self.update_transport();
@@ -271,8 +283,9 @@ impl super::Worker {
                 let _ = mpv.command(json!(["stop"])).await;
             }
             self.save_session(true);
-        } else if let Some(target) = self.pending_target.clone() {
-            self.play_target(target).await;
+        } else if let Some(selection) = self.pending_selection.clone() {
+            self.play_selection(selection.target, selection.source, selection.collection)
+                .await;
         } else if !self.idle
             && let (Some(mpv), Some(_)) = (self.mpv.clone(), self.current_entry)
         {
@@ -446,7 +459,7 @@ impl super::Worker {
             return;
         };
         let needs_stop = self.current_entry.is_some() || !self.idle;
-        if self.pending_target.is_some() {
+        if self.pending_selection.is_some() {
             self.new_epoch();
         }
         self.generation += 1;
@@ -952,6 +965,7 @@ impl super::Worker {
                 if epoch != self.epoch {
                     return;
                 }
+                let preparation = *preparation;
                 log::debug!(
                     "playback queue ready {:.3}s after selection",
                     preparation.asked.elapsed().as_secs_f64()
@@ -968,7 +982,7 @@ impl super::Worker {
                             info.current,
                             info.tracks.len(),
                         );
-                        self.pending_target = None;
+                        self.pending_selection = None;
                         self.state.source = preparation.source.clone();
                         self.set_queue(info.tracks, start);
                         if let Some(pos) = self.pos {
@@ -1464,6 +1478,18 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn shuffle_mode_is_available_before_choosing_music() {
+        let (mut worker, _dir) = worker();
+        let original = worker.state.shuffle;
+        worker.command(Command::ToggleShuffle).await;
+        assert_ne!(worker.state.shuffle, original);
+        assert!(worker.queue.is_empty());
+        assert!(worker.mpv.is_none());
+        worker.command(Command::ToggleShuffle).await;
+        assert_eq!(worker.state.shuffle, original);
+    }
+
     #[test]
     fn collection_shuffle_keeps_explicit_songs_and_reversible_order() {
         // A page Play/Shuffle action denotes the whole collection even when
@@ -1558,7 +1584,7 @@ mod tests {
                     tracks: vec![track("selected")],
                     ..Default::default()
                 }),
-                preparation,
+                preparation: Box::new(preparation),
             })
             .await;
         assert_eq!(
@@ -1636,7 +1662,7 @@ mod tests {
                     tracks: vec![track("actual")],
                     ..Default::default()
                 }),
-                preparation: Preparation {
+                preparation: Box::new(Preparation {
                     asked: Instant::now(),
                     source: None,
                     collection: false,
@@ -1645,7 +1671,7 @@ mod tests {
                         resolver::Request::Ready(Ok(fixture_stream("suggested"))),
                     )),
                     player: PreparingPlayer::Ready(player.clone()),
-                },
+                }),
             })
             .await;
         let message = tokio::time::timeout(
@@ -1696,7 +1722,7 @@ mod tests {
                     .internal(Internal::Queue {
                         epoch: worker.epoch + u64::from(outcome == "stale"),
                         result: Err("fixture queue failure".into()),
-                        preparation,
+                        preparation: Box::new(preparation),
                     })
                     .await;
             } else {
@@ -1746,6 +1772,7 @@ mod tests {
             Some("previous-account".into()),
         );
         worker.set_queue(vec![track("selected"), track("next")], 0);
+        worker.state.source = Some("Fixture context".into());
         worker.starting = true;
         let resolving = tokio::spawn(std::future::pending::<()>());
         let prefetching = tokio::spawn(std::future::pending::<()>());
@@ -1927,6 +1954,7 @@ mod tests {
     async fn pause_cancels_loading_and_preserves_the_target_and_seek() {
         let (mut worker, _dir) = worker();
         worker.set_queue(vec![track("selected")], 0);
+        worker.state.source = Some("Fixture context".into());
         worker.state.position = 42.0;
         worker.starting = true;
         worker.update_transport();
@@ -1939,7 +1967,11 @@ mod tests {
         assert_eq!(worker.resume_at, Some(42.0));
         assert_eq!(worker.current().unwrap().video_id, "selected");
         assert_eq!(worker.state.source.as_deref(), Some("Fixture context"));
-        worker.pending_target = Some(Target::browse("chosen-playlist"));
+        worker.pending_selection = Some(Selection {
+            target: Target::browse("chosen-playlist"),
+            source: Some("Chosen collection".into()),
+            collection: true,
+        });
         worker.starting = true;
         worker.update_transport();
         let queue = tokio::spawn(std::future::pending::<()>());
@@ -1947,9 +1979,12 @@ mod tests {
         worker.toggle_pause().await;
         assert!(queue.await.unwrap_err().is_cancelled());
         assert_eq!(
-            worker.pending_target.as_ref().unwrap().key(),
+            worker.pending_selection.as_ref().unwrap().target.key(),
             Target::browse("chosen-playlist").key()
         );
+        let pending = worker.pending_selection.as_ref().unwrap();
+        assert_eq!(pending.source.as_deref(), Some("Chosen collection"));
+        assert!(pending.collection);
         assert!(!worker.state.loading);
     }
 

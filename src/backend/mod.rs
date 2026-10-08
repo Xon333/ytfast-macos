@@ -326,7 +326,7 @@ enum Internal {
     Queue {
         epoch: u64,
         result: Result<WatchNext, String>,
-        preparation: playback::Preparation,
+        preparation: Box<playback::Preparation>,
     },
     /// More queue: a long playlist's next page, or the autoplay radio.
     Extended {
@@ -433,7 +433,7 @@ struct Worker {
     /// Fetching a chosen playlist/radio and its continuations.
     queue_request: Option<tokio::task::AbortHandle>,
     /// Retained when loading is cancelled so Play retries the selected list.
-    pending_target: Option<Target>,
+    pending_selection: Option<playback::Selection>,
     /// Until mpv reports playback-restart for the selected entry.
     starting: bool,
     buffering: bool,
@@ -508,7 +508,7 @@ impl Worker {
             prefetching: None,
             ready_next: None,
             queue_request: None,
-            pending_target: None,
+            pending_selection: None,
             starting: false,
             buffering: false,
             seeking: false,

@@ -226,7 +226,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         search.sendsWholeSearchString = true; search.setAccessibilityLabel("Search YouTube Music")
         if #available(macOS 26.0, *) { search.isAutomaticTextCompletionEnabled = false }
         search.contentType = nil
-        if #available(macOS 15.0, *) { search.allowsWritingTools = false }
+        if #available(macOS 15.2, *) { search.allowsWritingTools = false }
         fixed(search, 28); add(search)
         sections.selectedSegment = -1; sections.segmentDistribution = .fillEqually; sections.controlSize = .regular
         sections.segmentStyle = .capsule
@@ -800,7 +800,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         editor.isAutomaticQuoteSubstitutionEnabled = false
         editor.isAutomaticDashSubstitutionEnabled = false
         editor.contentType = nil
-        if #available(macOS 14.0, *) { editor.isAutomaticInlinePredictionEnabled = false }
+        if #available(macOS 14.0, *) { editor.inlinePredictionType = .no }
         if #available(macOS 15.0, *) { editor.writingToolsBehavior = .none }
         editor.insertionPointColor = NativeTheme.accent
         editor.selectedTextAttributes = [.foregroundColor: NativeTheme.text, .backgroundColor: NativeTheme.accent.withAlphaComponent(0.3)]
