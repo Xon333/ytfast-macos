@@ -4,15 +4,17 @@ YTfast is a lean native YouTube Music menu-bar player with one AppKit popover an
 
 ## Interface
 
-The 360-point AppKit popover sizes its content to the view: a compact connection screen, or up to six visible music rows with a scrolling list. A single player card groups transport, seek and volume above the list. The circular Play/Pause control becomes Cancel while a start is pending; shuffle has a visible toggle state. Seek previews the position during dragging and commits on release. Volume includes mute/restore. Quit and secondary actions live in More (…), including the saved Volume normalization toggle.
+The 360-point AppKit popover starts and reopens as a compact player with Search, Playlists, Liked and Albums launchers. Only the selected destination expands, showing up to five music rows with scrolling; clicking its launcher again collapses it. Account has its own connection view. A single player card groups transport, seek and volume above the list. The circular Play/Pause control becomes Cancel while a start is pending; Shuffle On / Off explicitly names its saved global state and is available before choosing a song. Seek previews the position during dragging and commits on release. Volume includes mute/restore. Quit and secondary actions live in More (…), including the saved Volume normalization toggle.
 
-The dropdown stays dark independently of the system appearance. Six unmodified Catppuccin Mocha tokens give it a charcoal background, raised surfaces, cool text and lavender controls. Existing Mino-derived buttons, native sliders, segmented navigation, row geometry and interactions are retained. One noninteractive, layer-free backdrop is added; there is no theme framework or animation loop.
+The dropdown stays dark independently of system appearance. It uses exact Oxocarbon base00/base06/base10/base12/base13 literals for neutral surfaces, white text, pink highlights and green state; the root background is explicitly overridden to OLED black. Blue/cyan tokens are not used. Existing Mino-derived buttons, AppKit sliders, segmented controls and reusable rows are adapted rather than replaced. One opaque native root replaces the unused visual-effect material plus opaque overlay. Play/Pause draws a true centred circle inside its hit area, independent of AppKit alignment insets.
 
-**Search / Playlists / Liked / Albums** are direct destinations. Search displays local loading state immediately, waits 180 ms before a network request, and runs on Return. Its editor preserves spaces and IME composition; only committed queries are normalized for requests. Search retains a stable viewport through typing, loading and empty results, without leaving preceding results actionable. Leaving Account resumes an interrupted query. Selecting the current song uses transport rather than fetching its queue again. The small playlist index warms once after account connection; no audio/resolver process is started for browsing.
+**Search / Playlists / Liked / Albums** are direct destinations. Search displays local loading state immediately, waits 180 ms before a network request, and runs on Return. Its editor preserves spaces and IME composition; only committed queries are normalized for requests. Search retains a stable viewport through typing, loading and empty results, without leaving preceding results actionable. Leaving Account resumes an interrupted query. Selecting the current song uses transport rather than fetching its queue again. Library pages load only on expansion; connecting or reopening the compact player does not fetch the playlist index or start audio/resolver processes.
 
-Playlists, albums and search destinations open inline. One navigation row switches between library tabs and a collection's Back/title/Play actions. Back restores query and scroll position; closing/reopening preserves the current destination. Rows expose Play and Add on hover or selection, plus a context menu, without confusing selection with activation. Position ticks and unchanged warm opens do not rebuild the table. `NSTableView` instantiates reusable visible cells, not a view per song. Refresh retains the visible list while the account-scoped snapshot and HTTPS path run.
+Playlists, albums and search destinations open inline. One navigation row switches between library tabs and a collection's Back/title/Play actions. Back restores query and scroll position; closing preserves the destination as history but resets expansion and releases the native page copy; reopening is compact. Rows expose Play and Add on hover or selection, plus a context menu, without confusing selection with activation. Position ticks and unchanged warm opens do not rebuild the table. `NSTableView` instantiates reusable visible cells, not a view per song. Refresh retains the visible list while the account-scoped snapshot and HTTPS path run.
 
 Arrow keys select without playing. Return activates, Space controls playback, Escape goes back, Command-F focuses search (also leaving the Add chooser without submitting it) and Command-R refreshes. Controls retain native accessibility labels, SF Symbol sizes and hover/selected/disabled states. Volume's speaker symbol follows the displayed level, including during dragging. No animation clock or per-row backing layers are added.
+
+The player displays the accepted collection/search context, saved with its queue across launches. More (⋯) contains codec/bitrate/source metadata. Shuffle changes upcoming queue order without restarting the current song. Collection Play actions reflect the global mode and choose a random loaded first song when shuffled; explicit song selections are preserved. The existing reversible queue shuffle owns order for playlists, albums, liked music and search-derived collections.
 
 **Add to playlist** captures the playing song and shows only server-confirmed editable destinations. Playback advancing does not change the add target. A seek begun on one song cannot affect its successor; backend updates do not move a slider being dragged.
 
@@ -28,7 +30,7 @@ Arrow keys select without playing. Return activates, Space controls playback, Es
 | Resolver: yt-dlp + Deno | Select and resolve audio streams |
 | mpv | Audio output, buffering and queued transitions |
 
-The Swift executable links the Rust core statically. The `menubar` dependency graph excludes egui, eframe, winit, wgpu and the desktop image/font stack. There is no WebView, browser player or UI polling/repaint timer; backend events wake the native run loop. Catalogue updates serialize borrowed Rust pages directly into the bridge buffer; Swift copies the bytes directly into `Data`. This removes the former catalogue clone, owned Rust JSON tree and intermediate Swift string.
+The Swift executable links the Rust core statically. The `menubar` dependency graph excludes egui, eframe, winit, wgpu and the desktop image/font stack. There is no WebView, browser player or UI polling/repaint timer; backend events wake the native run loop. Catalogue updates serialize only the expanded page, borrowed from the bounded Rust cache, directly into the bridge buffer; Swift consumes bytes directly into `Data`. Collapsed state sends no catalogue rows. Neither the app shell nor the panel state retains a duplicate catalogue. Closing clears native page/row copies, and common-mode callbacks have a bounded autorelease pool. The native search field disables unneeded completion, writing, spelling and data-detection services without changing system preferences; this does not establish removal of the OS AutoFill helper.
 
 The app is an `LSUIElement` with one status item and no normal Dock window. The separate macOS global Now Playing item is OS-owned. mpv's own media-key handling is disabled so native controls retain one owner.
 
@@ -40,7 +42,9 @@ The optional `desktop-ui` target is separate from the Mac package.
 
 On selection of a known song, its stream lookup, authoritative queue request and mpv startup proceed concurrently. A preparation object owns the shared resolver request and player-start task across the queue handoff. The returned queue still selects the actual current song: a mismatched suggested video ID is discarded rather than played under different metadata. Playlist-only targets start mpv while the queue identifies their first song.
 
-Once the queue arrives, next-track preparation joins the current lookup. Loudness/history metadata is fetched separately and does not gate stream readiness. A quick skip shares an existing next-track lookup. Cancelling, replacing or rejecting a queue drops its pending preparation; each cold player attempt has its own socket. Player adoption reapplies the latest volume, including adjustments made during loading.
+The authoritative queue request starts before old-player cleanup waits. A handoff does not repeat a stop command already sent for that queue. The next cold resolver waits until the current load is accepted, avoiding competing yt-dlp/Deno work during a first start. Loudness/history metadata is fetched separately and does not gate stream readiness. A quick skip shares an existing next-track lookup. Cancelling, replacing or rejecting a queue drops its pending preparation; each cold player attempt has its own socket. Player adoption reapplies the latest volume, including adjustments made during loading.
+
+The native mpv invocation reuses the installed player's `[libmpv]` profile and disables its unused built-in scripts (stats, console, OSD console, commands, select and auto-profiles), OSD and adjacent-file autoload. It keeps the same decoder, output, buffering and prefetch behavior. This requires mpv 0.41+; no mpv GPL source is copied into YTfast.
 
 mpv's eight property observations are submitted in one ordered IPC write, with every request ID/reply checked and all pending replies released on cancellation. Selection-to-playback timing includes queue latency; diagnostic stage timings distinguish queue readiness, stream/player readiness and accepted load. Actual mpv playback events determine completion. Buffer bounds and the reliable audio-output defaults are retained.
 
@@ -56,6 +60,8 @@ When enabled, loudness normalization uses YouTube's metadata with attenuation on
 
 ## Resource bounds
 
+Native catalogue transport is at most one expanded page; the collapsed panel retains no page/row snapshot. These are not total-process memory guarantees.
+
 | Resource | Current bound |
 | --- | --- |
 | Library pages held in memory | 8 |
@@ -66,7 +72,7 @@ When enabled, loudness normalization uses YouTube's metadata with attenuation on
 | mpv forward / back buffers | 4 MiB / 1 MiB |
 | mpv read-ahead | 60 seconds |
 
-The small playlist index warms after connection; other pages load on demand. No artwork, Home feed or lyrics are fetched for the native interface. Bounds limit individual caches and buffers; they are not a total-process memory guarantee.
+All native library pages load on demand, including the playlist index. No artwork, Home feed or lyrics are fetched for the native interface. Bounds limit individual caches and buffers; they are not a total-process memory guarantee.
 
 ## Authentication and account isolation
 
@@ -94,7 +100,7 @@ There is no hosted YTfast server or telemetry. Authenticated traffic goes direct
 
 ## Design provenance
 
-The action controls **reuse and adapt Mino's AppKit `MenuActionButton` source**, including its color/tracking/reset lifecycle: [revision `0ee56b7`](https://github.com/nad-bit/Mino/blob/0ee56b782b60c47ae1313d3f2c5c07bfb7497d0e/SwiftApp/Sources/RepoMenuItemView.swift). `native/MenuActionButton.swift` retains native button behavior and uses YTfast's existing layer-free drawing, larger hit targets and accessibility. `native/VolumeSymbol.swift` adapts **MacControlCenterUI's five volume levels and SF Symbols**: [revision `0869227`](https://github.com/orchetect/MacControlCenterUI/blob/086922750e4286477431be75032218350441db3c/Sources/MacControlCenterUI/Controls/MenuSlider/MenuSliderImage/VolumeMenuSliderImage.swift). `native/NativeTheme.swift` uses six exact **Catppuccin Mocha palette tokens**: [revision `07d02aa`](https://github.com/catppuccin/palette/blob/07d02aa110ef9eb7e7427afca5c73ba9cf7f8ebd/palette.json). The complete MIT notices are kept in `native/ThirdParty` and the app bundle.
+The action controls **reuse and adapt Mino's AppKit `MenuActionButton` source**, including its color/tracking/reset lifecycle: [revision `0ee56b7`](https://github.com/nad-bit/Mino/blob/0ee56b782b60c47ae1313d3f2c5c07bfb7497d0e/SwiftApp/Sources/RepoMenuItemView.swift). `native/MenuActionButton.swift` retains native button behavior and uses YTfast's existing layer-free drawing, larger hit targets and accessibility. `native/VolumeSymbol.swift` adapts **MacControlCenterUI's five volume levels and SF Symbols**: [revision `0869227`](https://github.com/orchetect/MacControlCenterUI/blob/086922750e4286477431be75032218350441db3c/Sources/MacControlCenterUI/Controls/MenuSlider/MenuSliderImage/VolumeMenuSliderImage.swift). `native/NativeTheme.swift` adapts exact non-blue **Oxocarbon palette literals** from [revision `cd6523a`](https://github.com/nyoom-engineering/oxocarbon.nvim/blob/cd6523a0836d6e8ee823d343149fd06c7b71fdde/lua/oxocarbon/init.lua#L9-L12), with the explicit OLED-black root override. Its Neovim/Lua highlighting code cannot run as an AppKit component, so only compatible tokens are adapted. Existing Mino button lifecycle and native navigation/queue implementations are reused for the compact flow and named shuffle state. The complete MIT notices are kept in `native/ThirdParty` and the app bundle.
 
 [Radio's player card at `f50fa2d`](https://github.com/pom11/Radio/blob/f50fa2d9685be17bfbdee0534ed9408dace8e2c1/Sources/PlayerControlCard.swift) was inspected for reuse. It is coupled to Radio's SwiftUI player/store/output types and macOS 14 target. MacControlCenterUI's larger controls similarly require a SwiftUI host and its MenuBarExtraAccess dependency. Those integrations are unsuitable for this bounded AppKit correction; the compatible source is adapted directly. Mino's search handler lacks composition protection, so it is not transplanted. Existing table reuse, navigation and slider ownership are retained.
 
@@ -104,7 +110,7 @@ For native interaction, [MonitorControl's slider handler](https://github.com/Mon
 
 ## Build and evidence
 
-Build on macOS 13+ with Rust 1.98+, Xcode Command Line Tools and Homebrew `mpv`, `yt-dlp` and `deno`:
+Build on macOS 13+ with Rust 1.98+, Xcode Command Line Tools and Homebrew `mpv` 0.41+, `yt-dlp` and `deno`:
 
 ```sh
 scripts/build-macos.sh

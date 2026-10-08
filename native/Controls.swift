@@ -51,16 +51,55 @@ final class SymbolButton: MenuActionButton {
         if primary || isOn || (isEnabled && (isHovered || pressed)) {
             let fill = primary || isOn ? NativeTheme.accent : NativeTheme.text
             fill.withAlphaComponent(primary ? (isEnabled ? (pressed ? 0.75 : 1) : 0.3) : (pressed ? 0.24 : (isOn ? 0.15 : 0.07))).setFill()
-            let radius: CGFloat = primary ? bounds.height / 2 : 7
-            NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: radius, yRadius: radius).fill()
+            if primary { NSBezierPath(ovalIn: circleBounds).fill() }
+            else { NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 7, yRadius: 7).fill() }
         }
         super.draw(dirtyRect)
     }
+    var circleBounds: NSRect {
+        let side = max(0, min(bounds.width, bounds.height) - 2)
+        return NSRect(x: bounds.midX - side / 2, y: bounds.midY - side / 2, width: side, height: side)
+    }
     override func drawFocusRingMask() {
-        let radius: CGFloat = primary ? bounds.height / 2 : 7
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: radius, yRadius: radius).fill()
+        if primary { NSBezierPath(ovalIn: circleBounds).fill() }
+        else { NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 7, yRadius: 7).fill() }
     }
     override var focusRingMaskBounds: NSRect { bounds }
+}
+
+/// The existing Mino-derived action button with a visible On/Off label. Native
+/// NSButton owns input/accessibility; no second shuffle state or custom switch.
+final class ShuffleButton: MenuActionButton {
+    var isOn = false {
+        didSet {
+            title = isOn ? "Shuffle On" : "Shuffle Off"
+            baseColor = isOn ? NativeTheme.success : NativeTheme.secondary
+            hoverColor = NativeTheme.text
+            setAccessibilityValue(isOn ? 1 : 0)
+            needsDisplay = true
+        }
+    }
+    init() {
+        super.init(frame: .zero)
+        isBordered = false; setButtonType(.momentaryChange)
+        image = NSImage(systemSymbolName: "shuffle", accessibilityDescription: nil)
+        imagePosition = .imageLeading; imageHugsTitle = true
+        font = .systemFont(ofSize: 11, weight: .medium)
+        title = "Shuffle Off"; baseColor = NativeTheme.secondary; hoverColor = NativeTheme.text
+        focusRingType = .exterior; setAccessibilityRole(.checkBox)
+        setAccessibilityLabel("Shuffle")
+        toolTip = "Shuffle the current queue and future collections; keep the current song."
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([widthAnchor.constraint(equalToConstant: 94), heightAnchor.constraint(equalToConstant: 28)])
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+    override func draw(_ dirtyRect: NSRect) {
+        if isOn || (isEnabled && (isHovered || cell?.isHighlighted == true)) {
+            (isOn ? NativeTheme.success.withAlphaComponent(0.16) : NativeTheme.hover).setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 7, yRadius: 7).fill()
+        }
+        super.draw(dirtyRect)
+    }
 }
 
 /// One lightweight surface groups related controls. No hosted SwiftUI view,
@@ -187,7 +226,7 @@ final class MusicRowView: NSTableRowView {
     }
     override func drawBackground(in dirtyRect: NSRect) {
         if hovered && !isSelected {
-            NativeTheme.surface.setFill()
+            NativeTheme.hover.setFill()
             NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 1), xRadius: 6, yRadius: 6).fill()
         }
     }
@@ -270,7 +309,7 @@ final class MusicCell: NSTableCellView {
         ])
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
-    func configure(_ row: Row, adding: Bool, current: Bool, playing: Bool, loading: Bool = false, enabled: Bool = true) {
+    func configure(_ row: Row, adding: Bool, current: Bool, playing: Bool, loading: Bool = false, enabled: Bool = true, shuffled: Bool = false) {
         var detail = row.subtitle
         for prefix in ["Playlist · ", "Album · "] where detail.hasPrefix(prefix) { detail.removeFirst(prefix.count) }
         setText(title, row.title); setText(subtitle, detail)
@@ -279,7 +318,7 @@ final class MusicCell: NSTableCellView {
         icon.setSymbol(current ? (loading ? "ellipsis" : (playing ? "waveform" : "pause.fill")) : (isCollection ? "square.stack" : "music.note"))
         icon.active = current
         canPlay = !adding && row.play != nil; canAdd = !adding && row.video != nil
-        playActionButton.setSymbol(current && loading ? "stop.fill" : (current && playing ? "pause.fill" : "play.fill"), current && loading ? "Cancel loading" : (current && playing ? "Pause" : "Play \(row.title)"))
+        playActionButton.setSymbol(current && loading ? "stop.fill" : (current && playing ? "pause.fill" : (shuffled && isCollection ? "shuffle" : "play.fill")), current && loading ? "Cancel loading" : (current && playing ? "Pause" : "\(shuffled && isCollection ? "Shuffle" : "Play") \(row.title)"))
         addActionButton.setSymbol("plus", "Add \(row.title) to playlist")
         playActionButton.isEnabled = enabled; addActionButton.isEnabled = enabled
         let symbol = adding ? "plus" : (isCollection ? "chevron.right" : (current && loading ? "ellipsis" : (current && playing ? "speaker.wave.2.fill" : "play.fill")))

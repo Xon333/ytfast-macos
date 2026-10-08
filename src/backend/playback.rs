@@ -13,6 +13,8 @@ pub(super) struct Preparation {
     asked: Instant,
     stream: Option<(String, resolver::Request)>,
     player: PreparingPlayer,
+    source: Option<String>,
+    collection: bool,
 }
 
 enum PreparingPlayer {
@@ -126,6 +128,23 @@ impl super::Worker {
     /// Fetch a chosen list without letting an earlier pending song win while
     /// the request is in flight. The selected target survives a loading Pause.
     pub(super) async fn play_target(&mut self, target: Target) {
+        let collection = matches!(
+            &target,
+            Target::Watch {
+                video_id: None,
+                playlist_id: Some(_),
+                ..
+            }
+        );
+        self.play_selection(target, None, collection).await;
+    }
+
+    pub(super) async fn play_selection(
+        &mut self,
+        target: Target,
+        source: Option<String>,
+        collection: bool,
+    ) {
         if !self.fresh_playback_allowed() {
             return;
         }
@@ -134,10 +153,14 @@ impl super::Worker {
         // metadata. Take a resolver share before cancelling the prior queue
         // or next lookup, so another click keeps work already in flight.
         let video_id = match &target {
-            Target::Watch { video_id, .. } => video_id.as_deref(),
+            Target::Watch { video_id, .. } if !(collection && self.state.shuffle) => {
+                video_id.as_deref()
+            }
             _ => None,
         };
-        let preparation = self.prepare_start(video_id);
+        let mut preparation = self.prepare_start(video_id);
+        preparation.source = source;
+        preparation.collection = collection;
         let epoch = self.new_epoch();
         self.generation += 1;
         self.cancel_resolution();
@@ -152,11 +175,6 @@ impl super::Worker {
         self.decks.radio = deck::is_radio(&target);
         self.pending_target = Some(target.clone());
         self.update_transport();
-        self.finish_blend().await;
-        self.drop_cued().await;
-        if let Some(mpv) = &self.mpv {
-            let _ = mpv.command(json!(["stop"])).await;
-        }
         let current = self.client.clone();
         let client = Arc::new(current.snapshot());
         let session_epoch = client.session_epoch();
@@ -213,6 +231,11 @@ impl super::Worker {
             }
         });
         self.queue_request = Some(task.abort_handle());
+        self.finish_blend().await;
+        self.drop_cued().await;
+        if let Some(mpv) = &self.mpv {
+            let _ = mpv.command(json!(["stop"])).await;
+        }
     }
 
     /// Pause remains useful before audio starts: cancel the pending work and
@@ -422,6 +445,7 @@ impl super::Worker {
         let Some(track) = self.track_at(pos).cloned() else {
             return;
         };
+        let needs_stop = self.current_entry.is_some() || !self.idle;
         if self.pending_target.is_some() {
             self.new_epoch();
         }
@@ -455,8 +479,9 @@ impl super::Worker {
         self.state.lyrics = None;
         self.state.related = None;
         self.emit(true);
-        if let Some(mpv) = &self.mpv {
-            // Stop the previous song at once; the new one follows when resolved.
+        if needs_stop && let Some(mpv) = &self.mpv {
+            // A queue handoff has already stopped the old file. Do not pay a
+            // second serial IPC acknowledgment before loading its new audio.
             let _ = mpv.command(json!(["stop"])).await;
         }
         if self.sleeping_at_song_end() {
@@ -472,8 +497,8 @@ impl super::Worker {
             keep
         });
         self.resolve_prepared(&track.video_id, preparation);
-        // Start the only next-song lookup alongside the current one. A quick
-        // skip shares that same run instead of starting another cold lookup.
+        // Reuse a ready successor; defer a cold next lookup until the current
+        // load is accepted so first playback does not compete with another resolver.
         self.prefetch();
         self.fetch_watch_info(&track.video_id);
         self.fetch_player(&track.video_id);
@@ -519,6 +544,8 @@ impl super::Worker {
             asked,
             stream,
             player,
+            source: None,
+            collection: false,
         }
     }
 
@@ -591,7 +618,12 @@ impl super::Worker {
     /// Resolve the next song at once. Its optional loudness/history request
     /// runs independently so it cannot delay a ready stream's handoff.
     pub(super) fn prefetch(&mut self) {
-        if self.account_checking {
+        // Current audio gets the CPU/network first. The existing accepted-load
+        // callback resumes this same prefetch path; cached successors and quick
+        // skips still share their in-flight resolver request.
+        if self.account_checking
+            || (cfg!(feature = "menubar") && self.starting && self.current_entry.is_none())
+        {
             return;
         }
         let Some(pos) = self.pos else { return };
@@ -926,8 +958,18 @@ impl super::Worker {
                 );
                 match result {
                     Ok(info) => {
+                        // Shuffle of a whole collection should start randomly,
+                        // not always at track one. An explicitly chosen song
+                        // still starts exactly there; the existing Queue owns
+                        // all subsequent order and reversible shuffling.
+                        let start = collection_start(
+                            self.state.shuffle,
+                            preparation.collection,
+                            info.current,
+                            info.tracks.len(),
+                        );
                         self.pending_target = None;
-                        let start = info.current;
+                        self.state.source = preparation.source.clone();
                         self.set_queue(info.tracks, start);
                         if let Some(pos) = self.pos {
                             self.start_prepared(pos, None, Some(preparation)).await;
@@ -1366,6 +1408,14 @@ impl super::Worker {
     }
 }
 
+fn collection_start(shuffle: bool, collection: bool, current: usize, count: usize) -> usize {
+    if shuffle && collection && count > 0 {
+        fastrand::usize(..count)
+    } else {
+        current
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1414,6 +1464,54 @@ mod tests {
         }
     }
 
+    #[test]
+    fn collection_shuffle_keeps_explicit_songs_and_reversible_order() {
+        // A page Play/Shuffle action denotes the whole collection even when
+        // YouTube's target includes a representative video id. A song never does.
+        assert_eq!(collection_start(false, true, 2, 6), 2);
+        assert_eq!(collection_start(true, false, 2, 6), 2);
+        assert_eq!(collection_start(true, true, 0, 0), 0);
+        assert_eq!(collection_start(true, true, 0, 1), 0);
+        let start = collection_start(true, true, 0, 6);
+        assert!(start < 6);
+        let mut queue = queue::Queue::default();
+        queue.replace((0..6).map(|i| track(&i.to_string())).collect());
+        let pos = queue.shuffle(start);
+        let selected = queue.id(pos).unwrap();
+        assert_eq!(queue.track(pos).unwrap().video_id, start.to_string());
+        let restored = queue.unshuffle(pos);
+        assert_eq!(queue.id(restored), Some(selected));
+        assert_eq!(
+            queue
+                .tracks()
+                .iter()
+                .map(|t| t.video_id.clone())
+                .collect::<Vec<_>>(),
+            (0..6).map(|i| i.to_string()).collect::<Vec<_>>()
+        );
+    }
+
+    #[cfg(feature = "menubar")]
+    #[tokio::test]
+    async fn cold_start_defers_successor_and_session_retains_source() {
+        let (mut worker, _dir) = worker();
+        worker.state.source = Some("Fixture collection".into());
+        worker.set_queue(vec![track("current"), track("successor")], 0);
+        worker.starting = true;
+        worker.current_entry = None;
+        worker.prefetch();
+        assert!(
+            worker.prefetching.is_none(),
+            "no second cold resolver before current load"
+        );
+        assert!(worker.player_requests.is_empty());
+        worker.save_session(true);
+        worker.state.source = None;
+        worker.restore_session();
+        assert_eq!(worker.state.source.as_deref(), Some("Fixture collection"));
+        assert!(worker.mpv.is_none());
+    }
+
     #[cfg(feature = "menubar")]
     fn fixture_stream(id: &str) -> Stream {
         Stream {
@@ -1440,6 +1538,8 @@ mod tests {
         let asked = Instant::now();
         let preparation = Preparation {
             asked,
+            source: Some("Fixture context".into()),
+            collection: false,
             stream: Some((
                 "selected".into(),
                 resolver::Request::Ready(Ok(fixture_stream("selected"))),
@@ -1466,6 +1566,7 @@ mod tests {
             "queue time belongs to click-to-play time"
         );
         assert_eq!(worker.current().unwrap().video_id, "selected");
+        assert_eq!(worker.state.source.as_deref(), Some("Fixture context"));
         assert!(worker.starting);
         assert!(worker.mpv.is_none(), "a second player must not be started");
         worker.state.volume = 26.0;
@@ -1537,6 +1638,8 @@ mod tests {
                 }),
                 preparation: Preparation {
                     asked: Instant::now(),
+                    source: None,
+                    collection: false,
                     stream: Some((
                         "suggested".into(),
                         resolver::Request::Ready(Ok(fixture_stream("suggested"))),
@@ -1583,6 +1686,8 @@ mod tests {
             starting.await.unwrap();
             let preparation = Preparation {
                 asked: Instant::now(),
+                source: None,
+                collection: false,
                 stream: None,
                 player: PreparingPlayer::Starting(task),
             };
@@ -1669,6 +1774,7 @@ mod tests {
         worker.maybe_extend();
         assert_eq!(worker.generation, generation);
         assert_eq!(worker.current().unwrap().video_id, "selected");
+        assert_eq!(worker.state.source.as_deref(), Some("Fixture context"));
         assert!(worker.resolving.is_none());
         assert!(worker.prefetching.is_none());
         assert!(worker.queue_request.is_none());
@@ -1832,6 +1938,7 @@ mod tests {
         assert!(!worker.state.playing);
         assert_eq!(worker.resume_at, Some(42.0));
         assert_eq!(worker.current().unwrap().video_id, "selected");
+        assert_eq!(worker.state.source.as_deref(), Some("Fixture context"));
         worker.pending_target = Some(Target::browse("chosen-playlist"));
         worker.starting = true;
         worker.update_transport();

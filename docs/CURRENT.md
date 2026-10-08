@@ -1,16 +1,28 @@
 # Current state
 
-**Updated:** 8 October 2026 · **Build:** 0.4.0, dark controls and native dismissal correction
+**Updated:** 8 October 2026 · **Candidate:** 0.5.0, compact OLED player and bounded native memory
 
 [Implementation and merge record](https://github.com/Xon333/ytfast-macos/pull/5) · [Architecture and bounds](MACOS.md)
 
-## Applied result
+## Compact OLED / memory candidate
 
-The corrective pass preserves raw search drafts and composition, keeps the search viewport steady, resumes searches interrupted by Account, lets Command-F leave Add without a write, and re-enables existing row actions when Add finishes. Actual Mino button source and MacControlCenterUI volume-symbol logic are adapted with bundled MIT notices. Borrowed Rust catalogue serialization and direct Swift byte consumption remove temporary copies without changing the bridge contract.
+Branch `perf/native-memory-20261008` continues from main `ca3400f`. The candidate replaces the blue theme with exact non-blue Oxocarbon literals on an OLED-black root, uses a true circular Play/Pause, exposes Shuffle On / Off globally, and opens only the selected library destination. Closing returns to a compact player showing its saved collection context. Audio format metadata moves to More.
 
-The user supplied the bounded real-Mac report and instructed **finish** on 8 October. It confirmed one S2 defect, D1: pointer activation of the status item intermittently left the popover open, while AXPress closed it. The finish pass gives dismissal one owner instead of combining transient mouse-down dismissal with the status item's mouse-up toggle. The native popover and anchoring remain; outside clicks, other-app activation, Space changes and Escape close it. Mouse/workspace observers exist only while shown and are removed on close or termination.
+The native bridge sends only one expanded page and releases native catalogue copies on close. An opaque root replaces redundant material compositing. The audio process reuses mpv's own embedding profile plus measured disabling of unused script interfaces. Current-start work no longer competes with a fresh successor resolver; queue HTTP starts before old-player cleanup, with no duplicate stop on handoff. Quality selection and buffer bounds are unchanged. The repo-wide exact-source → adaptation → replacement order is explicit in AGENTS.
 
-The additional visual-only request is implemented using six exact Catppuccin Mocha palette tokens: charcoal background, raised cards, cool text and lavender controls. The popover stays dark under either system appearance. Existing Mino-derived controls, slider input, navigation, geometry and hit areas are retained. No runtime dependency, animation clock, account change or saved preference is introduced. The finish pass does not change Rust, audio selection, authentication, search or playback preparation.
+### Reused, controlled audio-process probe
+
+[Run 37803401851](https://github.com/Xon333/ytfast-macos/actions/runs/37803401851), source `c8d8973`, compared three fresh processes per policy on the same macOS 15 runner. Workload: generated 48 kHz stereo 256 kbps Opus, current plus queued file, unchanged 4/1 MiB cache bounds and null audio output. These are offline decoder/cache observations, not YouTube or sound measurements.
+
+| Median of three trials | Previous options | Embedding profile + unused script UIs off |
+| --- | ---: | ---: |
+| Load → mpv playback-restart | 14.76 ms | 5.67 ms |
+| Playing physical footprint, vmmap M | 19.7 | 18.4 |
+| IPC ready | 159.19 ms | 190.85 ms |
+
+This establishes a smaller scripted-player footprint and lower local load-to-restart time in that fixture; it does **not** establish faster process startup. It does not prove 50 MB or consistently sub-100 MB on the user's Mac. RSS, app footprint, OS AutoFill and audio/resolver children must be reported separately. Current user screenshots show a 107.5–133 MB app-row value without column headers; its metric is not inferred.
+
+Candidate compilation, native captures and focused verification are pending. The package/evidence below belongs to the preceding accepted implementation, not this candidate.
 
 ## Exact verified package
 

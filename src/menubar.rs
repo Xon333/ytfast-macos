@@ -113,6 +113,7 @@ struct MenuSnapshot<'a> {
     volume: f64,
     shuffle: bool,
     format: Option<&'a str>,
+    source: Option<&'a str>,
     normalize: bool,
     signed_in: bool,
     account_checking: bool,
@@ -259,6 +260,7 @@ impl PageEntry {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
     Poll,
+    Collapse,
     Browse {
         target: String,
         #[serde(default)]
@@ -269,6 +271,10 @@ enum Request {
     },
     Play {
         target: String,
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        collection: bool,
     },
     Transport {
         action: String,
@@ -306,6 +312,7 @@ struct Core {
     pages: HashMap<String, PageEntry>,
     seq: u64,
     catalog_dirty: bool,
+    catalog_key: Option<String>,
     notice: Option<String>,
     error: Option<String>,
     pending_add: Option<u64>,
@@ -373,6 +380,10 @@ impl Core {
     fn request(&mut self, request: Request) -> Result<()> {
         match request {
             Request::Poll => {}
+            Request::Collapse => {
+                self.catalog_key = None;
+                self.catalog_dirty = true;
+            }
             Request::Browse { target, force } => {
                 if !matches!(self.account, Account::SignedIn { .. }) {
                     bail!("Reconnect to load your library");
@@ -382,6 +393,8 @@ impl Core {
                 if matches!(target, Target::Watch { .. }) {
                     bail!("Expected a library page");
                 }
+                self.catalog_key = Some(target.key());
+                self.catalog_dirty = true;
                 self.browse(target, force);
             }
             Request::More { key } => {
@@ -401,14 +414,24 @@ impl Core {
                     self.catalog_dirty = true;
                 }
             }
-            Request::Play { target } => {
+            Request::Play {
+                target,
+                source,
+                collection,
+            } => {
                 let target: Target =
                     serde_json::from_str(&target).context("Invalid playback target")?;
                 if !matches!(target, Target::Watch { .. }) {
                     bail!("Open this playlist and choose Play");
                 }
                 self.error = None;
-                self.backend.send(Command::PlayTarget(target));
+                let source =
+                    source.map(|s| s.chars().filter(|c| !c.is_control()).take(160).collect());
+                self.backend.send(Command::PlayNative {
+                    target,
+                    source,
+                    collection,
+                });
             }
             Request::Transport { action } => self.transport(&action)?,
             Request::Shuffle => self.backend.send(Command::ToggleShuffle),
@@ -488,6 +511,7 @@ impl Core {
     fn clear_account(&mut self) {
         self.account = Account::Checking;
         self.pages.clear();
+        self.catalog_key = None;
         self.catalog_dirty = true;
         self.pending_add = None;
         self.notice = None;
@@ -661,7 +685,7 @@ impl Core {
             }
         };
         let pages = std::mem::take(&mut self.catalog_dirty)
-            .then(|| self.pages.values().map(|e| &e.page).collect());
+            .then(|| visible_pages(&self.pages, self.catalog_key.as_deref()));
         Ok(serde_json::to_string(&MenuSnapshot {
             track,
             playing: pb.playing,
@@ -671,6 +695,7 @@ impl Core {
             volume: pb.volume,
             shuffle: pb.shuffle,
             format: pb.format.as_deref(),
+            source: pb.source.as_deref(),
             normalize: pb.normalize,
             signed_in,
             account_checking: matches!(self.account, Account::Checking),
@@ -693,6 +718,15 @@ impl Core {
             quit: self.quit,
         })?)
     }
+}
+
+fn visible_pages<'a>(
+    pages: &'a HashMap<String, PageEntry>,
+    key: Option<&str>,
+) -> Vec<&'a MenuPage> {
+    key.and_then(|key| pages.get(key))
+        .map(|entry| vec![&entry.page])
+        .unwrap_or_default()
 }
 
 fn valid_video(id: &str) -> bool {
@@ -784,6 +818,7 @@ pub extern "C" fn ytfast_start(wake: extern "C" fn()) -> *mut c_char {
                 pages: HashMap::new(),
                 seq: 0,
                 catalog_dirty: true,
+                catalog_key: None,
                 notice: None,
                 error: None,
                 pending_add: None,

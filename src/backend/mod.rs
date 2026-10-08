@@ -70,6 +70,12 @@ pub enum Command {
     },
     /// Play a song radio, playlist, album or mix through watch-next.
     PlayTarget(Target),
+    /// Native selection context travels with the same authoritative queue.
+    PlayNative {
+        target: Target,
+        source: Option<String>,
+        collection: bool,
+    },
     TogglePause,
     Next,
     Previous,
@@ -630,12 +636,20 @@ impl Worker {
                     return;
                 }
                 self.new_epoch();
+                self.state.source = None;
                 self.set_queue(tracks, start);
                 if let Some(pos) = self.pos {
                     self.start(pos).await;
                 }
             }
             Command::PlayTarget(target) => self.play_target(target).await,
+            Command::PlayNative {
+                target,
+                source,
+                collection,
+            } => {
+                self.play_selection(target, source, collection).await;
+            }
             Command::TogglePause => self.toggle_pause().await,
             Command::Next => self.next(false).await,
             Command::Previous => {

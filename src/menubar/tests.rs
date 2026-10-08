@@ -145,6 +145,7 @@ fn snapshot_fixture(pages: Option<Vec<&MenuPage>>) -> MenuSnapshot<'_> {
         volume: 70.0,
         shuffle: true,
         format: Some("Opus 256 kbps"),
+        source: Some("Fixture playlist"),
         normalize: true,
         signed_in: true,
         account_checking: false,
@@ -190,7 +191,7 @@ fn borrowed_snapshot_preserves_native_wire_contract() {
     let expected = json!({
         "track": {"id": "abcdefghijk", "title": "Night \"Live\"\n夜\0", "artist": "Fixture artist"},
         "playing": true, "loading": false, "position": 12.5, "duration": 180.0,
-        "volume": 70.0, "shuffle": true, "format": "Opus 256 kbps", "normalize": true,
+        "volume": 70.0, "shuffle": true, "format": "Opus 256 kbps", "source": "Fixture playlist", "normalize": true,
         "signed_in": true, "account_checking": false, "account_unverified": false,
         "account": "Fixture · Chrome", "profile": "fixture/default",
         "profiles": [{"id": "fixture/default", "label": "Chrome · Test profile"}],
@@ -227,7 +228,7 @@ fn owned_snapshot(snapshot: &MenuSnapshot<'_>) -> String {
     json!({
         "track": snapshot.track, "playing": snapshot.playing, "loading": snapshot.loading,
         "position": snapshot.position, "duration": snapshot.duration, "volume": snapshot.volume,
-        "shuffle": snapshot.shuffle, "format": snapshot.format, "normalize": snapshot.normalize,
+        "shuffle": snapshot.shuffle, "format": snapshot.format, "source": snapshot.source, "normalize": snapshot.normalize,
         "signed_in": snapshot.signed_in, "account_checking": snapshot.account_checking,
         "account_unverified": snapshot.account_unverified, "account": snapshot.account,
         "profile": snapshot.profile, "profiles": snapshot.profiles, "pages": pages,
@@ -295,4 +296,35 @@ fn snapshot_serialization_benchmark() {
             "borrowed_ms_per_snapshot": borrowed.as_secs_f64() * 1000.0 / f64::from(iterations)
         })
     );
+}
+
+#[test]
+fn collapsed_catalogue_sends_no_rows_and_browse_sends_only_its_page() {
+    let pages: HashMap<_, _> = (0..MAX_PAGES)
+        .map(|i| {
+            let mut entry = PageEntry::new(Target::browse(format!("fixture-{i}")), i as u64);
+            entry.page.rows = (0..MAX_ROWS).map(|_| MenuRow::default()).collect();
+            (entry.page.key.clone(), entry)
+        })
+        .collect();
+    assert!(visible_pages(&pages, None).is_empty());
+    assert!(visible_pages(&pages, Some("unknown")).is_empty());
+    let key = Target::browse("fixture-3").key();
+    let visible = visible_pages(&pages, Some(&key));
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].key, key);
+    assert_eq!(visible[0].rows.len(), MAX_ROWS);
+    assert!(matches!(
+        serde_json::from_str::<Request>(r#"{"op":"collapse"}"#).unwrap(),
+        Request::Collapse
+    ));
+    let legacy: Request = serde_json::from_str(r#"{"op":"play","target":"{}"}"#).unwrap();
+    assert!(matches!(
+        legacy,
+        Request::Play {
+            source: None,
+            collection: false,
+            ..
+        }
+    ));
 }
