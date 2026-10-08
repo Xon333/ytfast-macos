@@ -80,6 +80,25 @@ const OBSERVED: &[&str] = &[
     "seeking",
 ];
 
+// Reuse mpv's actual built-in embedding profile (etc/builtin.conf [libmpv]),
+// rather than cloning its media-control/input setup. Disable only its unused
+// console/overlay scripts. The reliable audio buffers and decode path stay put.
+// These public options are supported by mpv 0.41+; no libmpv linkage is added.
+const NATIVE_OPTIONS: &[&str] = &[
+    "--profile=libmpv",
+    "--load-scripts=no",
+    "--load-stats-overlay=no",
+    "--load-console=no",
+    "--load-commands=no",
+    "--load-auto-profiles=no",
+    "--load-select=no",
+    "--osd-level=0",
+    "--autoload-files=no",
+    "--demuxer-max-back-bytes=1MiB",
+    "--cache-secs=60",
+    "--demuxer-readahead-secs=60",
+];
+
 impl Mpv {
     /// Starts a process; its events arrive on `events` tagged with its
     /// [`serial`](Self::serial).
@@ -110,12 +129,7 @@ impl Mpv {
                 "--replaygain=no",
             ])
             .args(if cfg!(feature = "menubar") {
-                &[
-                    "--input-media-keys=no",
-                    "--demuxer-max-back-bytes=1MiB",
-                    "--cache-secs=60",
-                    "--demuxer-readahead-secs=60",
-                ][..]
+                NATIVE_OPTIONS
             } else {
                 &[]
             })

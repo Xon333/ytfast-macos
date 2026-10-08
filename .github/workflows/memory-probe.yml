@@ -16,7 +16,9 @@ jobs:
           persist-credentials: false
       - run: brew install mpv
       - name: Compare existing mpv with its upstream embedding profile
-        run: python3 scripts/probe-mpv-memory.py
+        run: |
+          python3 scripts/probe-mpv-memory.py
+          python3 scripts/probe-mpv-memory.py --endurance
       - name: Preserve exact public source for bounded implementation analysis
         if: always()
         run: |

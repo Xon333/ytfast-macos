@@ -32,6 +32,19 @@ async fn native_audio_transport() {
     let player = Mpv::spawn(&dir.join("mpv.sock"), 70.0, tx).await.unwrap();
     let spawn_ms = spawned.elapsed().as_secs_f64() * 1_000.0;
     assert_eq!(player.get("options/input-media-keys").await.unwrap(), false);
+    for name in [
+        "media-controls",
+        "osc",
+        "load-scripts",
+        "load-stats-overlay",
+        "load-console",
+        "load-commands",
+        "load-select",
+        "autoload-files",
+    ] {
+        assert_eq!(player.get(&format!("options/{name}")).await.unwrap(), false);
+    }
+    assert_eq!(player.get("options/gapless-audio").await.unwrap(), "yes");
     assert_eq!(
         player.get("options/demuxer-max-bytes").await.unwrap(),
         4 * 1024 * 1024

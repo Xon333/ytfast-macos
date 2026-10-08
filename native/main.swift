@@ -7,7 +7,11 @@ import CoreFoundation
 // Common-mode delivery keeps commands live during menu and slider tracking.
 func onMainRunLoop(_ action: @escaping () -> Void) {
     let loop = CFRunLoopGetMain()
-    CFRunLoopPerformBlock(loop, CFRunLoopMode.commonModes.rawValue, action)
+    // Backend wakeups are CFRunLoop blocks, not NSEvents. Bound Objective-C
+    // temporaries to this callback even during long, input-free playback.
+    CFRunLoopPerformBlock(loop, CFRunLoopMode.commonModes.rawValue) {
+        autoreleasepool(invoking: action)
+    }
     CFRunLoopWakeUp(loop)
 }
 let wakeLock = NSLock()
@@ -25,6 +29,10 @@ func nativeWake() {
     }
 }
 
+private struct CommandStamp: Equatable {
+    var enabled: Bool; var seekable: Bool; var shuffle: Bool
+}
+
 private struct MediaStamp {
     var song: Song; var playing: Bool; var position: Double; var duration: Double; var date: Date
 }
@@ -39,6 +47,7 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     let popover = NSPopover()
     private var signals: [DispatchSourceSignal] = []
     private var mediaStamp: MediaStamp?
+    private var commandStamp: CommandStamp?
     private var shuttingDown = false
     private var refreshBusy = false
     init(api: PlayerAPI, testing: Bool = false) { self.api = api; self.testing = testing }
@@ -70,8 +79,12 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         send(["op": "poll"])
     }
     func apply(_ next: State) {
-        state = next; panel.apply(next)
-        status.button?.toolTip = next.track.map { "\($0.title) · \($0.artist)" } ?? "YTfast"
+        let trackChanged = state.track != next.track
+        state = next; state.pages = nil
+        panel.apply(next)
+        if trackChanged {
+            status.button?.toolTip = next.track.map { "\($0.title) · \($0.artist)" } ?? "YTfast"
+        }
         if !testing { updateNowPlaying() }
         if next.quit && !testing { popover.close(); NSApplication.shared.terminate(nil) }
         else if next.show && !testing { onMainRunLoop { [weak self] in self?.showPopover() } }
@@ -137,14 +150,18 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             }
             return .success
         }
-        updateNowPlaying()
+        commandStamp = nil; updateNowPlaying()
     }
     private func updateNowPlaying() {
-        let center = MPRemoteCommandCenter.shared()
-        let enabled = state.track != nil || state.loading
-        for command in [center.playCommand, center.pauseCommand, center.togglePlayPauseCommand, center.nextTrackCommand, center.previousTrackCommand, center.changeShuffleModeCommand] { command.isEnabled = enabled }
-        center.changePlaybackPositionCommand.isEnabled = state.track != nil && state.duration > 0 && !state.loading
-        center.changeShuffleModeCommand.currentShuffleType = state.shuffle ? .items : .off
+        let commands = CommandStamp(enabled: state.track != nil || state.loading,
+            seekable: state.track != nil && state.duration > 0 && !state.loading, shuffle: state.shuffle)
+        if commandStamp != commands {
+            let center = MPRemoteCommandCenter.shared()
+            for command in [center.playCommand, center.pauseCommand, center.togglePlayPauseCommand, center.nextTrackCommand, center.previousTrackCommand, center.changeShuffleModeCommand] { command.isEnabled = commands.enabled }
+            center.changePlaybackPositionCommand.isEnabled = commands.seekable
+            center.changeShuffleModeCommand.currentShuffleType = commands.shuffle ? .items : .off
+            commandStamp = commands
+        }
         let info = MPNowPlayingInfoCenter.default()
         guard let song = state.track else {
             if mediaStamp != nil { info.nowPlayingInfo = nil; info.playbackState = .stopped; mediaStamp = nil }

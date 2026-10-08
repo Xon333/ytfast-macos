@@ -14,6 +14,8 @@ func finishSelfTest() {
     let controller = MenuApp(api: api, testing: true)
     controller.setup(); controller.refresh()
     let panel = controller.panel!
+    precondition(controller.state.pages == nil && panel.pages[playlistKey] != nil,
+                 "catalogue pages belong to the panel, not the shell snapshot")
     precondition(controller.popover.behavior == .applicationDefined, "status toggle must have one dismissal owner")
     precondition(controller.dismissal.activeObserverCount == 0, "closed panel must have no dismissal monitors")
     controller.showPopover()

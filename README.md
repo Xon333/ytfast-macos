@@ -15,7 +15,7 @@
 
 **Apple Silicon · macOS 13+**
 
-1. Install the audio tools (skip if already installed):
+1. Install the audio tools (mpv 0.41+; skip if already installed):
 
    ```sh
    brew install mpv yt-dlp deno

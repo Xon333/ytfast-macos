@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import shutil
 import socket
+import sys
 import subprocess
 import tempfile
 import time
@@ -84,7 +85,8 @@ def sample(pid, destination):
 def main():
     if os.environ.get("GITHUB_ACTIONS") != "true" or os.uname().sysname != "Darwin":
         raise SystemExit("Run only on the account-free macOS CI runner")
-    root = Path("artifacts/memory-probe")
+    endurance = "--endurance" in sys.argv
+    root = Path("artifacts/memory-probe") / ("endurance" if endurance else "short")
     root.mkdir(parents=True, exist_ok=True)
     mpv = shutil.which("mpv")
     options = output(mpv, "--no-config", "--list-options")
@@ -93,7 +95,9 @@ def main():
     available = {match.group(1) for match in re.finditer(r"^\s*--([a-z0-9-]+)\s", options, re.M)}
     unused = [arg for arg in UNUSED if arg[2:].split("=", 1)[0] in available]
     policies = [("base", []), ("upstream-libmpv", EMBEDDED), ("embedding-no-unused-scripts", EMBEDDED + unused)]
-    result = {"base_revision": "ca3400f1983e307bd893ce326b7d41612253b5c4", "os": output("sw_vers"),
+    if endurance:
+        policies = [policies[0], policies[-1]]
+    result = {"hold_seconds": 180 if endurance else 3, "base_revision": "ca3400f1983e307bd893ce326b7d41612253b5c4", "os": output("sw_vers"),
               "mpv": output(mpv, "--version"), "workload": "600s synthetic 48kHz stereo 256kbps Opus; forced cache; null audio output", "trials": []}
     (root / "available-unused-options.json").write_text(json.dumps(unused, indent=2))
     with tempfile.TemporaryDirectory(prefix="ytfast-mem-") as directory:
@@ -102,7 +106,7 @@ def main():
         subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
                         "sine=frequency=440:sample_rate=48000:duration=600", "-ac", "2", "-c:a",
                         "libopus", "-b:a", "256k", str(media)], check=True)
-        for trial in range(3):
+        for trial in range(1 if endurance else 3):
             ordered = policies if trial % 2 == 0 else list(reversed(policies))
             for name, policy in ordered:
                 sock = work / "p.sock"
@@ -131,7 +135,7 @@ def main():
                                 raise RuntimeError("no playback-restart")
                         record["load_to_restart_ms"] = (time.perf_counter() - start) * 1000
                         ipc.command("loadfile", str(media), "append")
-                        time.sleep(3)
+                        time.sleep(180 if endurance else 3)
                         record["playing"] = sample(child.pid, root / f"{name}-{trial}-playing.txt")
                         record["position"] = ipc.command("get_property", "time-pos")
                         record["audio_params"] = ipc.command("get_property", "audio-params")
