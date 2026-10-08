@@ -60,6 +60,6 @@ The build also produces `dist/ytfast-macos-<arch>.zip`. See [architecture](docs/
 
 ---
 
-Based on [MayberryDT/ytfast](https://github.com/MayberryDT/ytfast) (MIT). Native UI patterns informed by [Radio](https://github.com/pom11/Radio), [MacControlCenterUI](https://github.com/orchetect/MacControlCenterUI) and [Mino](https://github.com/nad-bit/Mino); playback reference: [Sonora](https://github.com/sonorahq/sonora). [License](LICENSE).
+Based on [MayberryDT/ytfast](https://github.com/MayberryDT/ytfast) (MIT). Native controls adapt source from [Mino](https://github.com/nad-bit/Mino) and [MacControlCenterUI](https://github.com/orchetect/MacControlCenterUI), with their MIT notices bundled. Design reference: [Radio](https://github.com/pom11/Radio); playback reference: [Sonora](https://github.com/sonorahq/sonora). [License](LICENSE).
 
 *Unofficial. Not affiliated with YouTube or Google.*

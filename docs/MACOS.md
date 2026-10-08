@@ -6,11 +6,11 @@ YTfast is a lean native YouTube Music menu-bar player with one AppKit popover an
 
 The 360-point AppKit popover sizes its content to the view: a compact connection screen, or up to six visible music rows with a scrolling list. A single player card groups transport, seek and volume above the list. The circular Play/Pause control becomes Cancel while a start is pending; shuffle has a visible toggle state. Seek previews the position during dragging and commits on release. Volume includes mute/restore. Quit and secondary actions live in More (…), including the saved Volume normalization toggle.
 
-**Search / Playlists / Liked / Albums** are direct destinations. Search displays local loading state immediately, waits 180 ms before a network request, and runs on Return. Selecting the current song uses transport rather than fetching its queue again. The small playlist index warms once after account connection; no audio/resolver process is started for browsing.
+**Search / Playlists / Liked / Albums** are direct destinations. Search displays local loading state immediately, waits 180 ms before a network request, and runs on Return. Its editor preserves spaces and IME composition; only committed queries are normalized for requests. Search retains a stable viewport through typing, loading and empty results, without leaving preceding results actionable. Leaving Account resumes an interrupted query. Selecting the current song uses transport rather than fetching its queue again. The small playlist index warms once after account connection; no audio/resolver process is started for browsing.
 
 Playlists, albums and search destinations open inline. One navigation row switches between library tabs and a collection's Back/title/Play actions. Back restores query and scroll position; closing/reopening preserves the current destination. Rows expose Play and Add on hover or selection, plus a context menu, without confusing selection with activation. Position ticks and unchanged warm opens do not rebuild the table. `NSTableView` instantiates reusable visible cells, not a view per song. Refresh retains the visible list while the account-scoped snapshot and HTTPS path run.
 
-Arrow keys select without playing. Return activates, Space controls playback, Escape goes back, Command-F focuses search and Command-R refreshes. Controls use native accessibility labels and dynamic system colors with explicit SF Symbol sizes and hover/selected states. No animation clock or per-row backing layers are added.
+Arrow keys select without playing. Return activates, Space controls playback, Escape goes back, Command-F focuses search (also leaving the Add chooser without submitting it) and Command-R refreshes. Controls use native accessibility labels and dynamic system colors with explicit SF Symbol sizes and hover/selected states. Volume's speaker symbol follows the displayed level, including during dragging. No animation clock or per-row backing layers are added.
 
 **Add to playlist** captures the playing song and shows only server-confirmed editable destinations. Playback advancing does not change the add target. A seek begun on one song cannot affect its successor; backend updates do not move a slider being dragged.
 
@@ -26,7 +26,7 @@ Arrow keys select without playing. Return activates, Space controls playback, Es
 | Resolver: yt-dlp + Deno | Select and resolve audio streams |
 | mpv | Audio output, buffering and queued transitions |
 
-The Swift executable links the Rust core statically. The `menubar` dependency graph excludes egui, eframe, winit, wgpu and the desktop image/font stack. There is no WebView, browser player or UI polling/repaint timer; backend events wake the native run loop.
+The Swift executable links the Rust core statically. The `menubar` dependency graph excludes egui, eframe, winit, wgpu and the desktop image/font stack. There is no WebView, browser player or UI polling/repaint timer; backend events wake the native run loop. Catalogue updates serialize borrowed Rust pages directly into the bridge buffer; Swift copies the bytes directly into `Data`. This removes the former catalogue clone, owned Rust JSON tree and intermediate Swift string.
 
 The app is an `LSUIElement` with one status item and no normal Dock window. The separate macOS global Now Playing item is OS-owned. mpv's own media-key handling is disabled so native controls retain one owner.
 
@@ -90,7 +90,9 @@ There is no hosted YTfast server or telemetry. Authenticated traffic goes direct
 
 ## Design provenance
 
-[Radio](https://github.com/pom11/Radio) informed the persistent compact player card; [MacControlCenterUI](https://github.com/orchetect/MacControlCenterUI) informed control grouping and toggle affordances; [Mino](https://github.com/nad-bit/Mino) informed reusable AppKit rows, inline actions and keyboard navigation. All three are MIT-licensed references. Their patterns are independently implemented here; their frameworks, sources and assets are not bundled.
+The action controls **reuse and adapt Mino's AppKit `MenuActionButton` source**, including its color/tracking/reset lifecycle: [revision `0ee56b7`](https://github.com/nad-bit/Mino/blob/0ee56b782b60c47ae1313d3f2c5c07bfb7497d0e/SwiftApp/Sources/RepoMenuItemView.swift). `native/MenuActionButton.swift` retains native button behavior and uses YTfast's existing layer-free drawing, larger hit targets and accessibility. `native/VolumeSymbol.swift` adapts **MacControlCenterUI's five volume levels and SF Symbols**: [revision `0869227`](https://github.com/orchetect/MacControlCenterUI/blob/086922750e4286477431be75032218350441db3c/Sources/MacControlCenterUI/Controls/MenuSlider/MenuSliderImage/VolumeMenuSliderImage.swift). Both complete MIT notices are kept in `native/ThirdParty` and the app bundle.
+
+[Radio's player card at `f50fa2d`](https://github.com/pom11/Radio/blob/f50fa2d9685be17bfbdee0534ed9408dace8e2c1/Sources/PlayerControlCard.swift) was inspected for reuse. It is coupled to Radio's SwiftUI player/store/output types and macOS 14 target. MacControlCenterUI's larger controls similarly require a SwiftUI host and its MenuBarExtraAccess dependency. Those integrations are unsuitable for this bounded AppKit correction; the compatible source is adapted directly. Mino's search handler lacks composition protection, so it is not transplanted. Existing table reuse, navigation and slider ownership are retained.
 
 [Sonora](https://github.com/sonorahq/sonora) informed the existing playback preparation, snapshot and account-isolation design. YTfast keeps its own InnerTube/yt-dlp/mpv implementation.
 

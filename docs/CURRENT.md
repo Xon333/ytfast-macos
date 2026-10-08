@@ -6,7 +6,15 @@
 
 Each Mac package identifies its exact source commit in `YTfast.app/Contents/Resources/source-revision.txt` and the `YTfastSourceRevision` Info.plist field.
 
-## Applied changes
+## Corrective candidate — native acceptance pending
+
+Branch `fix/native-ux-corrective-20261008` starts from main `a439761df7665e3e2ca268cc165281c83c97e86f`. It preserves raw search text and IME composition, keeps the search viewport stable, resumes searches after Account, lets Command-F leave the Add chooser, and re-enables row actions when an Add finishes. Controls now adapt actual Mino source and MacControlCenterUI volume-level logic, with bundled MIT notices. Borrowed catalogue serialization and direct Swift byte consumption remove temporary copies without changing the wire contract.
+
+The draft pull request carries the exact candidate revision and its automated checks. Native regression tests cover the changed interactions; an explicitly invoked serialization benchmark compares the previous and current bridge paths. Synthetic serialization timings do not establish live click-to-audio or listening-session memory improvements.
+
+**Do not merge or treat CI captures as native acceptance.** A separate Mac agent must inspect the exact packaged revision without changing implementation, configuration or account data. Its `native-validation.md` and the user's instruction **“finish”** are required before evaluating acceptance and merging. The evidence below belongs to the validated base and is retained for unchanged behavior.
+
+## Validated base
 
 The native dropdown groups metadata, transport, seek and volume in one compact player card. Library tabs fill the navigation row; a collection replaces that row with Back/title/Play instead of adding another row. Reusable music cells expose direct Play/Add actions on hover or selection and through context menus. Add captures the chosen song, and stale row actions cannot cross an account boundary. Connection screens distinguish browser permission, missing profiles, Keychain and unverified sessions, with complete instructions and a stable layout.
 

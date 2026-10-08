@@ -2,16 +2,15 @@ import AppKit
 
 /// Small native controls with consistent hit areas and explicit hover/on states.
 /// No animation clock or per-row backing layers are required.
-final class SymbolButton: NSButton {
-    private var hovered = false
-    private var tracking: NSTrackingArea?
+final class SymbolButton: MenuActionButton {
     private var symbolName = ""
     let primary: Bool
     let symbolSize: CGFloat
     var isOn = false {
         didSet {
             if oldValue != isOn {
-                contentTintColor = primary ? .white : (isOn ? .controlAccentColor : .labelColor)
+                baseColor = primary ? .white : (isOn ? .controlAccentColor : .labelColor)
+                hoverColor = baseColor
                 needsDisplay = true
             }
         }
@@ -33,7 +32,8 @@ final class SymbolButton: NSButton {
             widthAnchor.constraint(equalToConstant: size),
             heightAnchor.constraint(equalToConstant: size)
         ])
-        contentTintColor = primary ? .white : .labelColor
+        baseColor = primary ? .white : .labelColor
+        hoverColor = baseColor
         setSymbol(symbol, label)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
@@ -46,21 +46,9 @@ final class SymbolButton: NSButton {
         }
         if toolTip != label { toolTip = label; setAccessibilityLabel(label) }
     }
-    override func updateTrackingAreas() {
-        if let tracking { removeTrackingArea(tracking) }
-        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
-        addTrackingArea(area); tracking = area
-        super.updateTrackingAreas()
-        // Reused rows can move underneath a stationary pointer. Recompute the
-        // hover state instead of waiting for a mouse-exit event that never comes.
-        hovered = window.map { $0.isKeyWindow && visibleRect.contains(convert($0.mouseLocationOutsideOfEventStream, from: nil)) } ?? false
-        needsDisplay = true
-    }
-    override func mouseEntered(with event: NSEvent) { hovered = true; needsDisplay = true }
-    override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
     override func draw(_ dirtyRect: NSRect) {
         let pressed = cell?.isHighlighted == true
-        if primary || isOn || (isEnabled && (hovered || pressed)) {
+        if primary || isOn || (isEnabled && (isHovered || pressed)) {
             let fill: NSColor = primary ? .controlAccentColor : (isOn ? .controlAccentColor : .labelColor)
             fill.withAlphaComponent(primary ? (isEnabled ? (pressed ? 0.75 : 1) : 0.3) : (pressed ? 0.24 : (isOn ? 0.15 : 0.07))).setFill()
             let radius: CGFloat = primary ? bounds.height / 2 : 7

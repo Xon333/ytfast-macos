@@ -130,3 +130,167 @@ fn account_snapshot_is_visible_while_network_refresh_is_pending() {
     assert!(!entry.page.loading);
     assert!(entry.fetched.is_some());
 }
+
+fn snapshot_fixture(pages: Option<Vec<&MenuPage>>) -> MenuSnapshot<'_> {
+    MenuSnapshot {
+        track: Some(MenuTrack {
+            id: "abcdefghijk",
+            title: "Night \"Live\"\n夜\0",
+            artist: "Fixture artist".into(),
+        }),
+        playing: true,
+        loading: false,
+        position: 12.5,
+        duration: 180.0,
+        volume: 70.0,
+        shuffle: true,
+        format: Some("Opus 256 kbps"),
+        normalize: true,
+        signed_in: true,
+        account_checking: false,
+        account_unverified: false,
+        account: "Fixture · Chrome".into(),
+        profile: Some("fixture/default"),
+        profiles: vec![MenuProfile {
+            id: "fixture/default",
+            label: "Chrome · Test profile",
+        }],
+        pages,
+        notice: Some("Added to playlist"),
+        error: None,
+        adding: false,
+        show: true,
+        quit: false,
+    }
+}
+
+#[test]
+fn borrowed_snapshot_preserves_native_wire_contract() {
+    let page = MenuPage {
+        key: "browse:fixture:".into(),
+        target: "fixture target".into(),
+        title: "Fixture playlist".into(),
+        rows: vec![MenuRow {
+            title: "A song".into(),
+            subtitle: "An artist".into(),
+            play: Some("fixture play".into()),
+            video: Some("abcdefghijk".into()),
+            ..Default::default()
+        }],
+        loading: true,
+        more: true,
+        ..Default::default()
+    };
+    let mut snapshot = snapshot_fixture(Some(vec![&page]));
+    let pointer = ffi_encoded_result(|| Ok(serde_json::to_string(&snapshot)?));
+    // SAFETY: this is the single owner of the string returned above, exactly
+    // as in the native caller. Escaped NUL/UTF-8 must survive that boundary.
+    let response = unsafe { CString::from_raw(pointer) };
+    let actual: Value = serde_json::from_slice(response.as_bytes()).unwrap();
+    let expected = json!({
+        "track": {"id": "abcdefghijk", "title": "Night \"Live\"\n夜\0", "artist": "Fixture artist"},
+        "playing": true, "loading": false, "position": 12.5, "duration": 180.0,
+        "volume": 70.0, "shuffle": true, "format": "Opus 256 kbps", "normalize": true,
+        "signed_in": true, "account_checking": false, "account_unverified": false,
+        "account": "Fixture · Chrome", "profile": "fixture/default",
+        "profiles": [{"id": "fixture/default", "label": "Chrome · Test profile"}],
+        "pages": [{
+            "key": "browse:fixture:", "target": "fixture target", "title": "Fixture playlist",
+            "rows": [{"title": "A song", "subtitle": "An artist", "play": "fixture play",
+                "browse": null, "video": "abcdefghijk", "editable": null}],
+            "play": null, "loading": true, "more": true, "message": null
+        }],
+        "notice": "Added to playlist", "error": null, "adding": false, "show": true, "quit": false
+    });
+    assert_eq!(actual, expected);
+
+    // A clean catalogue means null (retain native pages), while an emptied
+    // catalogue means [] (clear native pages). Neither key may be omitted.
+    snapshot.pages = None;
+    snapshot.track = None;
+    let clean = serde_json::to_value(&snapshot).unwrap();
+    assert_eq!(clean.get("pages"), Some(&Value::Null));
+    assert_eq!(clean.get("track"), Some(&Value::Null));
+    snapshot.pages = Some(vec![]);
+    assert_eq!(serde_json::to_value(&snapshot).unwrap()["pages"], json!([]));
+}
+
+// The previous production path, kept only as a synthetic benchmark baseline:
+// clone the catalogue, construct its complete owned JSON tree, then encode.
+fn owned_snapshot(snapshot: &MenuSnapshot<'_>) -> String {
+    let pages = snapshot
+        .pages
+        .as_ref()
+        .map(|pages| pages.iter().map(|page| (**page).clone()).collect::<Vec<_>>());
+    json!({
+        "track": snapshot.track, "playing": snapshot.playing, "loading": snapshot.loading,
+        "position": snapshot.position, "duration": snapshot.duration, "volume": snapshot.volume,
+        "shuffle": snapshot.shuffle, "format": snapshot.format, "normalize": snapshot.normalize,
+        "signed_in": snapshot.signed_in, "account_checking": snapshot.account_checking,
+        "account_unverified": snapshot.account_unverified, "account": snapshot.account,
+        "profile": snapshot.profile, "profiles": snapshot.profiles, "pages": pages,
+        "notice": snapshot.notice, "error": snapshot.error, "adding": snapshot.adding,
+        "show": snapshot.show, "quit": snapshot.quit
+    })
+    .to_string()
+}
+
+#[test]
+#[ignore = "Synthetic serialization benchmark; run explicitly in release mode"]
+fn snapshot_serialization_benchmark() {
+    let pages: Vec<_> = (0..MAX_PAGES)
+        .map(|index| MenuPage {
+            key: format!("browse:fixture-{index}:"),
+            target: format!("fixture target {index}"),
+            title: format!("Fixture playlist {index}"),
+            rows: (0..MAX_ROWS)
+                .map(|index| {
+                    let video = format!("test{index:07}");
+                    MenuRow {
+                        title: format!("Track {index:04} — a longer synthetic library title"),
+                        subtitle: "Fixture artist · Collection".into(),
+                        play: serde_json::to_string(&Target::Watch {
+                            video_id: Some(video.clone()),
+                            playlist_id: Some("PLfixture".into()),
+                            params: None,
+                        })
+                        .ok(),
+                        video: Some(video),
+                        ..Default::default()
+                    }
+                })
+                .collect(),
+            ..Default::default()
+        })
+        .collect();
+    let snapshot = snapshot_fixture(Some(pages.iter().collect()));
+    let direct = serde_json::to_string(&snapshot).unwrap();
+    let previous = owned_snapshot(&snapshot);
+    assert_eq!(
+        serde_json::from_str::<Value>(&direct).unwrap(),
+        serde_json::from_str::<Value>(&previous).unwrap()
+    );
+    let bytes = direct.len();
+    drop((direct, previous));
+
+    let iterations = 20;
+    let mut owned = Duration::ZERO;
+    let mut borrowed = Duration::ZERO;
+    for _ in 0..iterations {
+        let started = Instant::now();
+        std::hint::black_box(owned_snapshot(&snapshot));
+        owned += started.elapsed();
+        let started = Instant::now();
+        std::hint::black_box(serde_json::to_string(&snapshot).unwrap());
+        borrowed += started.elapsed();
+    }
+    eprintln!(
+        "snapshot_serialization {}",
+        json!({
+            "pages": MAX_PAGES, "rows": MAX_PAGES * MAX_ROWS, "bytes": bytes,
+            "iterations": iterations,
+            "previous_ms_per_snapshot": owned.as_secs_f64() * 1000.0 / f64::from(iterations),
+            "borrowed_ms_per_snapshot": borrowed.as_secs_f64() * 1000.0 / f64::from(iterations)
+        })
+    );
+}

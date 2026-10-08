@@ -19,6 +19,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
     private var renderedLocation = ""
     private var searchWork: DispatchWorkItem?
     private var searchPending = false
+    private var searchViewportHeight: CGFloat = 176
     private var noticeWork: DispatchWorkItem?
     private var detailsVisible = false
     private var pendingSong: Song?
@@ -360,7 +361,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         }
         browserDirty = true
         render()
-        if searchPending { submitSearch() } else { loadCurrent() }
+        resumeBrowsing()
         onMainRunLoop { [weak self] in
             guard let self, self.visible, let window = self.view.window,
                   !(window.firstResponder is NSTextView) else { return }
@@ -382,12 +383,14 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
             state.error != next.error || state.notice != next.notice || state.adding != next.adding
         let trackChanged = state.track?.id != next.track?.id
         let transportChanged = trackChanged || state.playing != next.playing || state.loading != next.loading
+        let rowAvailabilityChanged = state.adding != next.adding || state.account_checking != next.account_checking || state.signed_in != next.signed_in
         let hasAudioChanged = (state.track != nil || state.loading) != (next.track != nil || next.loading)
         if trackChanged || (state.loading && !next.loading) || next.error != nil { pendingSong = nil }
         if boundary {
             accountGeneration += 1; browserError = nil
             searchWork?.cancel(); searchWork = nil; searchPending = false
             pages.removeAll(); history.removeAll(); location = .library(libraryIndex)
+            if isViewLoaded { search.stringValue = "" }
             renderedLocation = ""; pendingSong = nil; detailsVisible = false
         }
         if !next.signed_in { pages.removeAll() }
@@ -414,7 +417,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         browserDirty = browserDirty || boundary || chromeChanged || trackChanged || hasAudioChanged
         if visible {
             render()
-            if transportChanged { updateVisibleRows() }
+            if transportChanged || rowAvailabilityChanged { updateVisibleRows() }
         }
         if connected {
             // Warm only the small playlist index, including its disk snapshot.
@@ -450,9 +453,12 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         setText(playbackStatus, state.loading ? "Loading…" : (state.format?.components(separatedBy: " (").first ?? ""))
         playbackStatus.toolTip = state.format
         busy(playbackSpinner, state.loading)
-        muteButton.setSymbol(state.volume == 0 ? "speaker.slash" : "speaker.wave.2", state.volume == 0 ? "Unmute" : "Mute")
-        volume.toolTip = "Volume \(Int(volume.doubleValue.rounded()))%"
+        renderVolume(volume.doubleValue)
         if browserDirty || renderedLocation != location.identity { renderBrowser() }
+    }
+    private func renderVolume(_ value: Double) {
+        muteButton.setSymbol(VolumeSymbol.name(percent: value), value == 0 ? "Unmute" : "Mute")
+        volume.toolTip = "Volume \(Int(value.rounded()))%"
     }
     private func renderTimes(_ position: Double) {
         setText(elapsed, timeLabel(position)); setText(remaining, "−" + timeLabel(max(0, state.duration - position)))
@@ -494,7 +500,6 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         setText(pageTitle, location.song.map { "Add “\($0.title)”" } ?? (page?.title.isEmpty == false ? page!.title : location.title))
         pageTitle.toolTip = pageTitle.stringValue
         sections.selectedSegment = nested ? -1 : libraryIndex
-        if search.stringValue != location.query { search.stringValue = location.query }
         moreButton.isHidden = account || page?.more != true
         moreButton.isEnabled = !loading; moreButton.title = loading ? "Loading…" : "Load more"
         emptyLabel.isHidden = account || !rows.isEmpty
@@ -507,7 +512,11 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         retryButton.isHidden = account || page?.message == nil
         dismissButton.isHidden = state.error == nil && state.notice == nil
         if account { renderAccount() } else { busy(accountSpinner, false) }
-        browserHeight.constant = account ? (detailsVisible ? 258 : 196) : (rows.isEmpty ? 104 : CGFloat(min(6, rows.count)) * 44)
+        // A search keeps its viewport through debounce, loading and empty
+        // results. Stale rows are still removed; typing never moves the footer
+        // or the result targets up and down with each network response.
+        let rowHeight = rows.isEmpty ? 104 : CGFloat(min(6, rows.count)) * 44
+        browserHeight.constant = account ? (detailsVisible ? 258 : 196) : (location.query.isEmpty ? rowHeight : searchViewportHeight)
         let heights: [(NSView, CGFloat)] = [(player, playerHeight.constant), (search, 28), (tabs, 30), (browser, browserHeight.constant), (moreButton, 26), (messageRow, 34), (footerSeparator, 1), (footer, 26)]
         let shown = heights.filter { !$0.0.isHidden }
         let size = NSSize(width: Self.width, height: shown.reduce(24) { $0 + $1.1 } + CGFloat(max(0, shown.count - 1)) * 8)
@@ -588,13 +597,22 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         guard visible, state.signed_in, !showingAccount else { return }
         send(["op": "browse", "target": location.target, "force": force])
     }
+    private func resumeBrowsing() {
+        if searchPending { submitSearch() } else { loadCurrent() }
+    }
     func navigate(_ next: Location, remember: Bool = true, load: Bool = true) {
         searchWork?.cancel(); searchWork = nil; searchPending = false
         if remember {
             location.scroll = scroll.contentView.bounds.origin; history.append(location)
             if history.count > 16 { history.removeFirst() }
         }
+        if location.query.isEmpty, !next.query.isEmpty {
+            searchViewportHeight = max(176, min(264, browserHeight?.constant ?? 176))
+        }
         showingAccount = false; location = next; browserDirty = true
+        // Synchronize only on navigation. Backend updates must never replace
+        // the field editor's raw draft, selection or marked text.
+        if search.stringValue != next.searchText { search.stringValue = next.searchText }
         if let index = next.libraryIndex { libraryIndex = index }
         if visible { render() }
         if load { loadCurrent() }
@@ -605,7 +623,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         navigate(.library(libraryIndex), remember: false)
     }
     @objc func back(_ sender: Any?) {
-        if showingAccount { showingAccount = false; browserDirty = true; render(); loadCurrent(); return }
+        if showingAccount { showingAccount = false; browserDirty = true; render(); resumeBrowsing(); return }
         guard let previous = history.popLast() else {
             if location.libraryIndex == nil || location.song != nil { navigate(.library(libraryIndex), remember: false) }
             return
@@ -641,7 +659,7 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
     }
     @objc func volumeChanged(_ sender: NSSlider) {
         let value = sender.doubleValue.rounded()
-        volume.toolTip = "Volume \(Int(value))%"
+        renderVolume(value)
         guard !volume.editing || lastSentVolume != value else { return }
         lastSentVolume = value; send(["op": "volume", "value": value])
     }
@@ -718,8 +736,12 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         enterSearch(immediate: false)
     }
     private func enterSearch(immediate: Bool) {
-        let query = String(search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).prefix(300))
         searchWork?.cancel(); searchWork = nil
+        // Let the input method finish composing. A pending prior query is
+        // resumed only after committed text arrives or browsing is resumed.
+        if let editor = search.currentEditor() as? NSTextView, editor.hasMarkedText() { return }
+        let draft = search.stringValue
+        let query = String(draft.trimmingCharacters(in: .whitespacesAndNewlines).prefix(300))
         guard !query.isEmpty else {
             searchPending = false
             if !location.query.isEmpty { back(nil) }
@@ -727,9 +749,11 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
         }
         guard state.signed_in else { return }
         let target = encodeTarget("Search", ["query": query, "params": NSNull()])
-        guard let destination = Location.from(target, title: "Search") else { return }
+        guard var destination = Location.from(target, title: "Search") else { return }
+        destination.searchText = draft
         let changed = location.key != destination.key
         if changed { navigate(destination, remember: location.query.isEmpty, load: false) }
+        else { location.searchText = draft }
         if !changed && !searchPending { return }
         searchPending = true; browserDirty = true
         if visible { render() }
@@ -748,14 +772,18 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
     }
     @objc func searchNow(_ sender: Any?) { enterSearch(immediate: true) }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        guard control === search else { return false }
+        guard control === search, !textView.hasMarkedText() else { return false }
         if commandSelector == NSSelectorFromString("moveDown:") || commandSelector == NSSelectorFromString("insertNewline:") {
             searchNow(nil)
-            if !rows.isEmpty { table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false); view.window?.makeFirstResponder(table) }
+            if !rows.isEmpty {
+                table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+                table.scrollRowToVisible(0); view.window?.makeFirstResponder(table)
+            }
             return true
         }
         if commandSelector == NSSelectorFromString("insertTab:"), !rows.isEmpty {
             if table.selectedRow < 0 { table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) }
+            table.scrollRowToVisible(table.selectedRow)
             view.window?.makeFirstResponder(table); return true
         }
         if commandSelector == NSSelectorFromString("cancelOperation:") { escape(); return true }
@@ -764,14 +792,19 @@ final class PlayerPanel: NSViewController, NSTableViewDataSource, NSTableViewDel
 
     func focusSearch() {
         guard state.signed_in else { return }
+        let needsResume = showingAccount || location.song != nil || searchPending
         showingAccount = false; browserDirty = true
+        // Search is global. Leave any captured Add chooser without performing
+        // a playlist write, then restore the preceding browsing destination.
+        while location.song != nil { navigate(history.popLast() ?? .library(libraryIndex), remember: false, load: false) }
+        if needsResume { resumeBrowsing() }
         if visible { render(); view.window?.makeFirstResponder(search); search.selectText(nil) }
     }
     @objc func showAccount(_ sender: Any?) {
         showingAccount.toggle(); detailsVisible = false; browserDirty = true
         if showingAccount { searchWork?.cancel(); searchWork = nil }
         if visible { render() }
-        if !showingAccount { if searchPending { submitSearch() } else { loadCurrent() } }
+        if !showingAccount { resumeBrowsing() }
     }
     @objc private func selectProfile(_ sender: NSPopUpButton) {
         guard let id = sender.selectedItem?.representedObject as? String, id != state.profile else { return }
