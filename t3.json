@@ -1,0 +1,21 @@
+{
+  "$schema": "https://t3.codes/schema/t3.json",
+  "defaultThreadEnvMode": "worktree",
+  "scripts": [
+    {
+      "name": "Rust formatting",
+      "command": "cargo fmt --all --check",
+      "icon": "lint"
+    },
+    {
+      "name": "Menu core lint",
+      "command": "cargo clippy --locked --no-default-features --features menubar --lib -- -D warnings",
+      "icon": "lint"
+    },
+    {
+      "name": "Menu core tests",
+      "command": "cargo test --locked --release --no-default-features --features menubar --lib",
+      "icon": "test"
+    }
+  ]
+}
