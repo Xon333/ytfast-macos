@@ -81,8 +81,9 @@ const OBSERVED: &[&str] = &[
 ];
 
 // Reuse mpv's actual built-in embedding profile (etc/builtin.conf [libmpv]),
-// rather than cloning its media-control/input setup. Disable only its unused
-// console/overlay scripts. The reliable audio buffers and decode path stay put.
+// rather than cloning its media-control/input setup. Built-in scripts have
+// separate switches: load-scripts only covers the user scripts directory.
+// Disable unused UI scripts; keep the audio buffers and decode path unchanged.
 // These public options are supported by mpv 0.41+; no libmpv linkage is added.
 const NATIVE_OPTIONS: &[&str] = &[
     "--profile=libmpv",
@@ -92,6 +93,8 @@ const NATIVE_OPTIONS: &[&str] = &[
     "--load-commands=no",
     "--load-auto-profiles=no",
     "--load-select=no",
+    "--load-positioning=no",
+    "--load-context-menu=no",
     "--osd-level=0",
     "--autoload-files=no",
     "--demuxer-max-back-bytes=1MiB",

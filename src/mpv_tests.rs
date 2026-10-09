@@ -40,6 +40,8 @@ async fn native_audio_transport() {
         "load-console",
         "load-commands",
         "load-select",
+        "load-positioning",
+        "load-context-menu",
         "autoload-files",
     ] {
         assert_eq!(player.get(&format!("options/{name}")).await.unwrap(), false);
