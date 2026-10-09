@@ -54,7 +54,7 @@ Existing working accounts do not need to be reconfigured for these UI changes. S
 
 ## Playback and footprint
 
-Direct mpv playback preserves yt-dlp's source-quality and Premium-aware stream selection. No transcoding or artificial enhancement. Queue requests, stream resolution and player preparation overlap. Unused mpv script interfaces and duplicate media controls are disabled through its own embedding profile; cold next-track resolution waits for the current load to be accepted.
+Direct mpv playback preserves yt-dlp's source-quality and Premium-aware stream selection. No transcoding or artificial enhancement. Queue requests, stream resolution and player preparation overlap. Unused mpv script interfaces, including positioning and context menu, and duplicate media controls are disabled through its own embedding profile and built-in switches; cold next-track resolution waits for the current load to be accepted.
 
 Only the expanded library page crosses the native bridge; closing drops its Swift catalogue copy. The Rust cache remains bounded for quick reopening. No artwork, Home feed, lyrics, idle resolver, theme framework or UI polling loop.
 

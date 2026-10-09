@@ -44,7 +44,7 @@ On selection of a known song, its stream lookup, authoritative queue request and
 
 The authoritative queue request starts before old-player cleanup waits. A handoff does not repeat a stop command already sent for that queue. The next cold resolver waits until the current load is accepted, avoiding competing yt-dlp/Deno work during a first start. Loudness/history metadata is fetched separately and does not gate stream readiness. A quick skip shares an existing next-track lookup. Cancelling, replacing or rejecting a queue drops its pending preparation; each cold player attempt has its own socket. Player adoption reapplies the latest volume, including adjustments made during loading.
 
-The native mpv invocation reuses the installed player's `[libmpv]` profile and disables its unused built-in scripts (stats, console, OSD console, commands, select and auto-profiles), OSD and adjacent-file autoload. It keeps the same decoder, output, buffering and prefetch behavior. This requires mpv 0.41+; no mpv GPL source is copied into YTfast.
+The native mpv invocation reuses the installed player's `[libmpv]` profile and disables its unused built-in scripts (stats, console, commands, select, auto-profiles, positioning and context menu), OSD and adjacent-file autoload. Built-ins have separate switches: `load-scripts=no` only prevents loading scripts from the user configuration directory. These exact options are supplied by [mpv 0.41](https://github.com/mpv-player/mpv/blob/v0.41.0/options/options.c); no mpv GPL source is copied into YTfast. The same decoder, automatic audio-output selection, buffering and prefetch behavior remain.
 
 mpv's eight property observations are submitted in one ordered IPC write, with every request ID/reply checked and all pending replies released on cancellation. Selection-to-playback timing includes queue latency; diagnostic stage timings distinguish queue readiness, stream/player readiness and accepted load. Actual mpv playback events determine completion. Buffer bounds and the reliable audio-output defaults are retained.
 
@@ -73,6 +73,12 @@ Native catalogue transport is at most one expanded page; the collapsed panel ret
 | mpv read-ahead | 60 seconds |
 
 All native library pages load on demand, including the playlist index. No artwork, Home feed or lyrics are fetched for the native interface. Bounds limit individual caches and buffers; they are not a total-process memory guarantee.
+
+### Bounded real-output comparison
+
+`python3 scripts/probe-mpv-memory.py --real-audio` runs a one-off comparison on a Mac using the installed mpv and generated 48 kHz stereo Opus. It adapts the existing probe and reads the current native options from `src/mpv.rs`. It compares explicit AVFoundation, CoreAudio and CoreAudio with interleaved float output, verifies the selected output, and records CPU-time deltas and separate physical-footprint/RSS snapshots through natural transitions, pause and resume. It does not read accounts, alter the app or save host settings. Keep the physical output device unchanged; the fixture produces audible test tones.
+
+The float arm isolates the [reported macOS 27 CoreAudio initialization issue](https://github.com/mpv-player/mpv/issues/18384#issuecomment-5597870245). It is a diagnostic option, not a shipped output policy. A failed output is reported rather than silently replaced with null output. Output-device changes, normalization, native media controls, mono/multichannel routing and acoustic quality still need separate observation before adopting a driver change. The default and `--endurance` modes remain historical account-free **CI/null-output** comparisons; their earlier numbers do not establish real-device memory or audibility.
 
 ## Authentication and account isolation
 
