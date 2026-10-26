@@ -1,5 +1,7 @@
 # YTfast contributor guidance
 
+Mode: `dev`. [T3 project standard](https://github.com/Xon333/t3/blob/main/docs/policy/PROJECT-STANDARD.md) owns shared source workflow and selected native account/model/options; keep product-specific contracts below.
+
 ## Product and authority
 
 The macOS product is a lean native YouTube Music menu-bar player. Its current AppKit popover provides persistent playback controls, search and inline library browsing.
